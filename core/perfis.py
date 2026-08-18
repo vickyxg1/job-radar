@@ -43,6 +43,19 @@ from core.config_intl import (
     MERCADOS_REMOTO_ACEITOS_INTL,
     IDIOMAS_EXIGIDOS_INTL,
 )
+from core.config_dev import (
+    KEYWORDS_DEV,
+    KEYWORDS_CARGO_FORTE_DEV,
+    KEYWORDS_CARGO_AMBIGUO_DEV,
+    QUALIFICADORES_DEV,
+    FERRAMENTAS_TITULO_DEV,
+    QUALIFICADORES_CARGO_DEV,
+    CIDADES_DEV,
+    MERCADOS_REMOTO_ACEITOS_DEV,
+    LOCATIONS_LINKEDIN_REMOTO_APENAS_DEV,
+    TERMOS_BUSCA_DEV,
+    TERMOS_POR_CICLO_DEV,
+)
 from core.job import RegrasFiltro
 from scrapers.catho import CathoScraper
 from scrapers.geekhunter import GeekHunterScraper
@@ -232,7 +245,63 @@ PERFIL_INTL = Perfil(
     max_scrapers_concorrentes=3,
 )
 
+
+# Regra primária: cidade de quem roda este perfil (Uberlândia) ou "Remoto"
+# com mercado Brasil (+ internacional, se ATIVAR_REMOTO_INTERNACIONAL_DEV
+# estiver ligado — ver config_dev.py) aceito.
+_REGRAS_DEV = RegrasFiltro(
+    keywords_forte=KEYWORDS_CARGO_FORTE_DEV,
+    keywords_ambiguo=KEYWORDS_CARGO_AMBIGUO_DEV,
+    qualificadores_dados=QUALIFICADORES_DEV,
+    ferramentas_titulo=FERRAMENTAS_TITULO_DEV,
+    qualificadores_cargo=QUALIFICADORES_CARGO_DEV,
+    cidades=CIDADES_DEV,
+    mercados_remoto_aceitos=MERCADOS_REMOTO_ACEITOS_DEV,
+)
+
+# Perfil novo, sem medição de rendimento por fonte ainda (mesma situação do
+# perfil Internacional quando criado) — todas as fontes rodam toda vez
+# (FREQUENCIA_ALTA). Ajustar pra FREQUENCIA_BAIXA depois que tiver dado real
+# de quanto cada uma rende pra vaga de dev (ver comentário de _SCRAPERS_BR
+# pro exemplo desse ajuste já feito lá).
+#
+# LinkedInScraper reaproveitado com `locations`/`locations_remoto_apenas`/
+# `locations_cidades_presencial` PRÓPRIOS deste perfil (ver __init__ em
+# scrapers/linkedin.py) — não usa os defaults de config.py (que são do
+# perfil Dados: Nordeste + países LATAM/Ibéria), então os dois perfis
+# rodam o mesmo scraper com geografia totalmente independente.
+_SCRAPERS_DEV = [
+    DefinicaoScraper(LinkedInScraper, FREQUENCIA_ALTA, {
+        "locations": ["Brasil"],
+        "locations_remoto_apenas": LOCATIONS_LINKEDIN_REMOTO_APENAS_DEV,
+        "locations_cidades_presencial": ["Uberlândia"],
+    }),
+    DefinicaoScraper(GupyScraper, FREQUENCIA_ALTA),
+    DefinicaoScraper(IndeedScraper, FREQUENCIA_ALTA),
+    DefinicaoScraper(GeekHunterScraper, FREQUENCIA_ALTA),  # recrutadora focada em tech — bom encaixe a priori
+    DefinicaoScraper(CathoScraper, FREQUENCIA_BAIXA),
+    DefinicaoScraper(Jobs99Scraper, FREQUENCIA_BAIXA),
+    DefinicaoScraper(SolidesScraper, FREQUENCIA_BAIXA),
+    DefinicaoScraper(WeWorkRemotelyIntlScraper, FREQUENCIA_ALTA),  # agregador 100% remoto, tech-heavy
+]
+
+PERFIL_DEV = Perfil(
+    chave="dev",
+    nome="Dev",
+    palavras_monitoradas=KEYWORDS_DEV,
+    paises_pesquisados=LOCATIONS_LINKEDIN_REMOTO_APENAS_DEV or None,
+    regras=_REGRAS_DEV,
+    regras_eixo_secundario=None,
+    eixo_secundario_ativo=False,
+    eixo_secundario_rotulo="",
+    termos_busca=TERMOS_BUSCA_DEV,
+    termos_por_ciclo=TERMOS_POR_CICLO_DEV,
+    definicao_scrapers=_SCRAPERS_DEV,
+    max_scrapers_concorrentes=4,
+)
+
 PERFIS = {
     PERFIL_BR.chave: PERFIL_BR,
     PERFIL_INTL.chave: PERFIL_INTL,
+    PERFIL_DEV.chave: PERFIL_DEV,
 }

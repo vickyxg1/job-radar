@@ -159,6 +159,15 @@ _MERCADOS_REMOTO = {
     "canada": "Canadá",
     "germany": "Alemanha",
     "alemanha": "Alemanha",
+    # Adicionados junto com o perfil "dev" (ver core/config_dev.py) — sem
+    # esses dois, vaga remota confirmada via LinkedIn (location=Ireland/
+    # Netherlands, f_WT=2) resolvia pra "escopo desconhecido" e era barrada
+    # mesmo com o país listado em MERCADOS_REMOTO_ACEITOS_DEV, porque
+    # _mercados_correspondentes só reconhece o que está aqui.
+    "ireland": "Irlanda",
+    "irlanda": "Irlanda",
+    "netherlands": "Holanda",
+    "holanda": "Holanda",
     "latam": "LATAM",
     "latin america": "LATAM",
     "america latina": "LATAM",
