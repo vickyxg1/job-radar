@@ -1,6 +1,29 @@
 name: JobRadar
 
 on:
+  # ONDE O CICLO RODA -- historico, porque isso ja mudou de lugar duas
+  # vezes e o motivo importa mais que a escolha.
+  #
+  # CORRECAO DE 30/08, 16:30: a versao anterior deste comentario dizia que
+  # o motivo era bloqueio ao IP de datacenter do Actions. ESTAVA ERRADO --
+  # o ciclo local, de IP residencial, deu 22 buscas vazias contra 13 do
+  # Actions, e o mesmo par devolve 0 e 10 em horas diferentes do MESMO IP.
+  # A medicao inteira esta no topo de scrapers/linkedin.py. Rodar aqui ou
+  # na maquina da usuaria NAO muda o resultado das buscas.
+  #
+  # Entao a escolha entre os dois e de conveniencia, nao tecnica: aqui roda
+  # sozinho e nao depende do computador ligado; la o ciclo termina mais
+  # rapido (~26 min contra ~35) e da pra ver o log ao vivo.
+  #
+  # O QUE NAO PODE e deixar os dois ligados: a deduplicacao mora em
+  # data/jobs.db, que este workflow commita de volta no repositorio. Com o
+  # ciclo local rodando sem empurrar o banco, este aqui parte de um banco
+  # desatualizado e RENOTIFICA vaga ja avisada.
+  #
+  # RELIGADO em 30/08 19:50, depois de um ciclo rodado na maquina da
+  # usuaria. Rodar la nao melhorou busca nenhuma (deu 22 vazias contra 13
+  # daqui), e exige o computador ligado -- entao voltou pro automatico.
+  # Um lugar por vez, sempre: ver a nota do data/jobs.db acima.
   schedule:
     - cron: "0 */3 * * *"
   workflow_dispatch: {}
@@ -45,53 +68,98 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         # Antes disso só o perfil Brasil rodava aqui — main_intl.py existia
         # no repositório mas nunca foi chamado pelo workflow, então o
-        # pipeline internacional nunca rodou de verdade em produção. Agora é
-        # um projeto só com dois perfis selecionáveis (ver core/perfis.py); os
-        # dois rodam na mesma execução/commit, um após o outro.
-        run: python main.py --perfil dev --once
+        # pipeline internacional nunca rodou de verdade em produção. Depois
+        # virou um projeto só com dois perfis selecionáveis (ver
+        # core/perfis.py). Reconciliação de 2026-09-24 (merge do fork que
+        # criou o perfil dev, nunca antes trazido pro origin): os 3 perfis
+        # coexistem no mesmo código, rodam na mesma execução/commit, um
+        # após o outro — nenhum foi descontinuado pelo merge.
+        run: python main.py --perfil brasil internacional dev --once
+
+      # jobradar.log esta no .gitignore e o disco do runner e descartado ao
+      # fim da execucao -- ou seja, ate aqui NENHUM log de ciclo do Actions
+      # sobrevivia. Isso so nao doia porque a usuaria colava o log na mao.
+      # Passou a doer quando analisar_vazios.py comecou a precisar de VARIOS
+      # ciclos seguidos pra responder se busca vazia se recupera sozinha.
+      #
+      # if: always() de proposito: o log do ciclo que QUEBROU e justamente o
+      # que mais interessa guardar.
+      - name: Guardar o log do ciclo (pra analisar_vazios.py)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jobradar-log-${{ github.run_number }}
+          path: jobradar.log
+          retention-days: 14
+          if-no-files-found: warn
 
       - name: Salvar vagas já vistas (evita notificação duplicada)
         run: |
           git config user.name "jobradar-bot"
           git config user.email "jobradar-bot@users.noreply.github.com"
 
-          git add data/jobs.db
-          if git diff --cached --quiet; then
-            echo "Nada novo pra commitar."
-            exit 0
+          # O banco produzido por ESTA execução, guardado fora da árvore do
+          # repositório. É a única coisa deste run que sobrevive ao passo
+          # abaixo — todo o resto é descartado e retomado do GitHub.
+          if [ ! -f data/jobs.db ]; then
+            echo "data/jobs.db não existe ao fim do ciclo — nada a salvar."
+            exit 1
           fi
-          git commit -m "chore: atualiza vagas vistas [skip ci]"
+          cp data/jobs.db "${RUNNER_TEMP:-/tmp}/jobs.db"
 
-          # Se outro push (execução concorrente, ou push manual) chegou
-          # primeiro, o push abaixo é rejeitado. Em vez de falhar o run
-          # (o que faria a vaga ser notificada de novo no próximo ciclo),
-          # sincroniza e tenta de novo. data/jobs.db é binário (SQLite):
-          # em caso de conflito, quem deve vencer é a versão deste run
-          # (base + vagas encontradas agora), não a de origin/main.
+          # MEDIDO (18/08): este passo usava
           #
-          # MEDIDO: estava "-X ours", que em `git merge` de fato mantém o
-          # lado local — mas em `git rebase` a semântica é invertida: o
-          # rebase reaplica os commits deste run EM CIMA de origin/main, e
-          # nesse processo "ours" passa a se referir à branch de destino
-          # (origin/main), "theirs" ao commit sendo reaplicado (este run).
-          # Confirmado com um repositório de teste isolado: rebase com
-          # "-X ours" manteve o conteúdo do upstream, descartando o local.
-          # Resultado real: toda vez que o push colidia, o jobs.db commitado
-          # voltava a ser o de origin/main — vaga encontrada e notificada
-          # neste run desaparecia do banco (reaparecia como "nova" no ciclo
-          # seguinte) e qualquer backfill de coluna (ex: chave_secundaria)
-          # também era descartado, mesmo rodando com sucesso a cada
-          # iniciar_db(). Corrigido para "-X theirs" — mesmo teste isolado,
-          # resultado contrário: manteve a versão deste run.
+          #     git rebase origin/main -X theirs
+          #
+          # pra reenviar quando o push era recusado. Na madrugada de 18/08 o
+          # histórico do repositório foi reescrito enquanto uma execução
+          # estava no ar (ela começou 21h e terminou 23h12). Ao ser recusada,
+          # ela caiu nesse rebase e REAPLICOU commits antigos por cima do
+          # estado novo, com "-X theirs" resolvendo a favor da versão do run.
+          # Resultado: main.py e core/config.py voltaram atrás e duas
+          # correções foram desfeitas em produção — descoberto só quando a
+          # usuária relatou que uma notificação parou de chegar.
+          #
+          # Prova de autoria do commit que reverteu (75de7b6): autor
+          # "liliam" (autoria original preservada no replay) mas committer
+          # "jobradar-bot", no mesmo segundo do commit deste passo.
+          #
+          # O robô não tem motivo NENHUM pra escrever arquivo de código. Em
+          # vez de reaplicar commits em cima do estado remoto, ele agora
+          # ADOTA o estado remoto inteiro e recoloca só o banco por cima.
+          # A diferença importa: reaplicar commit pode trazer junto qualquer
+          # coisa que estava naquele commit; recolocar um arquivo só não
+          # pode. Qualquer commit gerado aqui contém data/jobs.db e mais
+          # nada — verificado em simulação com divergência máxima (duas
+          # correções de código + reescrita de histórico ao mesmo tempo).
+          #
+          # Efeito colateral bom: se alguém enviar correção de código no meio
+          # de um ciclo, o robô passa a INCORPORAR essa correção em vez de
+          # disputar com ela.
           n=0
-          until git push; do
+          while :; do
+            git fetch origin main
+            git reset --hard origin/main
+
+            cp "${RUNNER_TEMP:-/tmp}/jobs.db" data/jobs.db
+            git add data/jobs.db
+
+            if git diff --cached --quiet; then
+              echo "Nada novo pra commitar."
+              exit 0
+            fi
+
+            git commit -m "chore: atualiza vagas vistas [skip ci]"
+
+            if git push; then
+              exit 0
+            fi
+
             n=$((n + 1))
             if [ "$n" -ge 5 ]; then
               echo "Push falhou depois de 5 tentativas."
               exit 1
             fi
             echo "Push rejeitado, sincronizando (tentativa $n)..."
-            git fetch origin main
-            git rebase origin/main -X theirs || git rebase --abort
             sleep $((RANDOM % 5 + 1))
           done

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
 import hashlib
 import re
@@ -293,6 +294,26 @@ _CIDADES_MERCADO = {
     "islas baleares": "Espanha",
     "mendoza": "Argentina",
     "rosario": "Argentina",
+    # MEDIDO no log de 21/08: "rancagua (2)" aparecendo como descarte por
+    # escopo — vaga do Chile, mercado ACEITO, jogada fora so por a cidade
+    # nao estar aqui. "granada" e "pachuca de soto" ja tinham aparecido do
+    # mesmo jeito em ciclos anteriores.
+    #
+    # As demais desta leva NAO vieram de descarte registrado: sao capitais
+    # e cidades grandes dos mesmos paises aceitos, adicionadas pela politica
+    # que este dicionario ja declara acima — custo de manter a lista maior e
+    # zero (so comparacao de string), custo de faltar um nome e falso
+    # negativo silencioso, que e o erro caro aqui.
+    "rancagua": "Chile",
+    "vina del mar": "Chile",
+    "antofagasta": "Chile",
+    "concepcion": "Chile",
+    "salta": "Argentina",
+    "mar del plata": "Argentina",
+    "granada": "Espanha",
+    "pachuca de soto": "México",
+    "puebla": "México",
+    "queretaro": "México",
     "bucaramanga": "Colômbia",
     "cali": "Colômbia",
     "barranquilla": "Colômbia",
@@ -468,6 +489,11 @@ _SIGLAS_ESTADOS_EUA = {
     "wi", "wy", "dc",
 }
 
+# Sigla dos EUA que tambem e outra coisa em pais aceito. "dc" = District of
+# Columbia, mas tambem "Distrito Capital" (Bogota, D.C.). So estas exigem que
+# a cidade confirme — ver o laco de segmentos em extrair_escopo_remoto.
+_SIGLAS_EUA_AMBIGUAS = {"dc"}
+
 # MEDIDO: "Remoto (Maceió, AL)", "Remoto (Belém, PA)", "Remoto (Florianópolis,
 # SC)", "Remoto (Cuiabá, MT)", "Remoto (São Luís, MA)", "Remoto (Campo
 # Grande, MS)" — as 27 UFs brasileiras usam sigla de 2 letras igual ao
@@ -493,6 +519,90 @@ _SIGLAS_UF_BRASIL = {
 # nome da cidade antes de decidir Brasil vs EUA. Sigla de UF que não colide
 # (RJ, SP, PE...) já resolve sozinha, nenhum estado americano usa essas.
 _SIGLAS_UF_AMBIGUAS = {"al", "ma", "mt", "ms", "pa", "sc"}
+
+# MEDIDO: "CAMPINA GRANDE DO SUL - PR" era ACEITA como se fosse Campina
+# Grande/PB. Sao cidades diferentes, a 2.500 km uma da outra. O filtro de
+# cidade procura o nome dentro do texto de `local` com borda de palavra, e
+# "campina grande" tem borda valida dentro de "campina grande do sul" — o
+# nome da cidade aceita e prefixo de outra cidade real. Mesmo caso de
+# "Natal da Serra - MG" virando Natal/RN.
+#
+# Achado ao rodar uma fonte nova (Senior) que tem muita vaga de cidade
+# pequena; as fontes antigas concentram em capital e o caso quase nao
+# aparecia. Nao e bug da fonte nova: valia pra todas.
+#
+# A UF resolve sem tocar no casamento de nome: quando o texto DECLARA uma
+# sigla de estado e ela nao e a esperada pra aquela cidade, nao e a cidade
+# certa. Limite conhecido e aceito: texto SEM UF nenhuma ("Campina Grande
+# do Sul", sozinho) continua passando — sem a sigla nao ha o que comparar,
+# e inventar regra por contagem de palavras arriscaria barrar "Recife PE"
+# ou "vaga em Natal". Preferir o falso positivo raro ao falso negativo.
+_UF_DA_CIDADE = {
+    "campina grande": "pb",
+    "joao pessoa": "pb",
+    "recife": "pe",
+    "natal": "rn",
+    "caruaru": "pe",
+    "manaus": "am",
+    "maceio": "al",
+    "aracaju": "se",
+    # Fortaleza tem três homônimas em outros estados — "Fortaleza de Minas"
+    # (MG), "Fortaleza dos Nogueiras" (MA) e "Fortaleza dos Valos" (RS).
+    # Medido: sem esta linha, as três passavam.
+    "fortaleza": "ce",
+}
+
+
+# MEDIDO (2026-08-21): a guarda de UF só entendia SIGLA de duas letras, mas o
+# LinkedIn escreve o estado POR EXTENSO. Consequência: a mesma vaga era
+# barrada ou passava dependendo só de como a fonte escreve o local —
+#     "Campina Grande do Sul - PR"                -> barrada (correto)
+#     "Campina Grande do Sul, Paraná, Brazil"     -> PASSAVA (errado)
+# e o segundo formato é justamente o do LinkedIn, hoje origem de quase toda
+# vaga brasileira do projeto. A guarda estava furada onde mais importa.
+#
+# Conferido contra os 38 formatos de local brasileiro que existem de verdade
+# no jobs.db: 36 resolvem. Os dois que não: "Brazil" puro (não declara estado
+# nenhum, e aí não há o que conferir) e "Brasília, Federal District" — o
+# LinkedIn escreve o DF em INGLÊS, então essa grafia entra na tabela também.
+_NOME_DO_ESTADO = {
+    "acre": "ac", "alagoas": "al", "amapa": "ap", "amazonas": "am",
+    "bahia": "ba", "ceara": "ce", "distrito federal": "df",
+    "federal district": "df", "espirito santo": "es", "goias": "go",
+    "maranhao": "ma", "mato grosso": "mt", "mato grosso do sul": "ms",
+    "minas gerais": "mg", "para": "pa", "paraiba": "pb", "parana": "pr",
+    "pernambuco": "pe", "piaui": "pi", "rio de janeiro": "rj",
+    "rio grande do norte": "rn", "rio grande do sul": "rs",
+    "rondonia": "ro", "roraima": "rr", "santa catarina": "sc",
+    "sao paulo": "sp", "sergipe": "se", "tocantins": "to",
+}
+
+
+def _uf_declarada(local_norm: str) -> str | None:
+    """Sigla de UF brasileira presente no texto de local, se houver.
+
+    Le os pedacos separados por virgula/hifen/barra — os formatos que as
+    fontes usam de verdade ("Natal - RN", "Recife, PE", "Recife/PE").
+    None quando nenhum pedaco e uma sigla de UF."""
+    for pedaco in re.split(r"[,\-–—/]", local_norm):
+        pedaco = pedaco.strip(" .")
+        if pedaco in _SIGLAS_UF_BRASIL:
+            return pedaco
+        if pedaco in _NOME_DO_ESTADO:
+            return _NOME_DO_ESTADO[pedaco]
+    return None
+
+
+def _cidade_confere(cidade_norm: str, local_norm: str) -> bool:
+    """A cidade bateu no texto — mas e a cidade certa?
+
+    Ver _UF_DA_CIDADE. So reprova quando o texto declara uma UF e ela
+    contradiz a esperada."""
+    uf_esperada = _UF_DA_CIDADE.get(cidade_norm)
+    if uf_esperada is None:
+        return True
+    uf_texto = _uf_declarada(local_norm)
+    return uf_texto is None or uf_texto == uf_esperada
 
 # Capital de cada estado brasileiro (+DF), normalizado — usado só pra
 # desambiguar as 6 siglas acima. Cobre exatamente o formato que o LinkedIn
@@ -655,6 +765,20 @@ def extrair_escopo_remoto(texto_local: str, modalidade: str = "") -> set[str]:
             if seg not in _SIGLAS_UF_AMBIGUAS or cidade in _CAPITAIS_BRASIL:
                 return {"Brasil"}
         if seg in _SIGLAS_ESTADOS_EUA:
+            # MEDIDO (21/08): "Remoto (Bogotá, D.C.)" resolvia pra Estados
+            # Unidos e a vaga era descartada — mas "D.C." ali e Distrito
+            # Capital, que e como a Colombia escreve Bogota. O laco retornava
+            # na sigla ANTES de olhar a cidade, entao "bogota" nunca era
+            # consultada ("Remoto (Bogota)", sem o D.C., resolvia certo pra
+            # Colombia).
+            #
+            # Mesma solucao que as 6 UFs brasileiras ambiguas ja usam logo
+            # acima: sigla que colide so decide depois que a cidade confirma.
+            # Restrito a "dc" DE PROPOSITO — regra generica de "cidade
+            # conhecida vence a sigla" quebraria "San Jose, CA", que e
+            # California de verdade e nao San Jose da Costa Rica.
+            if seg in _SIGLAS_EUA_AMBIGUAS and cidade in _CIDADES_MERCADO:
+                return {_CIDADES_MERCADO[cidade]}
             return {"Estados Unidos"}
         # MEDIDO: "San Luis Potosi, S. L. P." chega como segmento "s l p"
         # (o ponto ja foi removido, o espaco nao) e nunca batia contra a
@@ -775,6 +899,40 @@ _PADRAO_DATA_RELATIVA = re.compile(
 _PADRAO_HOJE_ONTEM = re.compile(r"\b(hoje|ontem)\b", re.IGNORECASE)
 
 
+_PADRAO_DATA_ISO = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# Idade a partir da qual uma vaga com data ABSOLUTA conta como antiga.
+# 30 dias porque e exatamente o que o formato relativo ja considerava: o
+# teste antigo era '"mes" in texto', e "ha 1 mes" ja batia. Mantem o mesmo
+# criterio pras duas formas de data, em vez de criar um segundo conceito.
+DIAS_PARA_PUBLICACAO_ANTIGA = 30
+
+
+def extrair_data_do_card(atributo_datetime: str | None, texto_card: str) -> str:
+    """Data de publicacao do card, preferindo a ABSOLUTA quando existir.
+
+    MEDIDO (2026-08-21): o card do LinkedIn tem <time datetime="2026-03-26">
+    e o texto "4 months ago" — em INGLES. extrair_data_publicacao so conhece
+    padrao em portugues ("ha 4 meses", "publicada em 11/08"), entao nunca
+    casava: 1.061 de 1.061 vagas do LinkedIn ficaram sem data nenhuma.
+
+    Sem data, Job.publicacao_antiga sempre volta False e vaga velha e
+    notificada como se fosse fresca. Na pagina 1 de "analista de dados"
+    (Brasil, remoto), 4 dos 6 primeiros cards tinham mais de um mes.
+
+    A tag e melhor que o texto por dois motivos, os dois medidos: e absoluta
+    (nao depende de calcular "4 months ago" contra a data de hoje) e nao
+    depende de idioma. E havia card cujo TEXTO nao trazia a idade nenhuma,
+    so a tag — pra esse, texto nenhum resolveria.
+
+    Cai pro texto quando nao ha tag: fonte sem <time> continua funcionando
+    exatamente como antes.
+    """
+    if atributo_datetime and _PADRAO_DATA_ISO.match(atributo_datetime.strip()):
+        return atributo_datetime.strip()
+    return extrair_data_publicacao(texto_card)
+
+
 def extrair_data_publicacao(texto_card: str) -> str:
     """Procura sinal de data de publicação no texto renderizado de um card
     de vaga. Cobre formato absoluto ("Publicada em 11/08", "Publicada em 11
@@ -893,6 +1051,7 @@ class _Avaliacao:
     bate_ferramenta: bool
     bate_remoto: bool
     escopos: set[str]
+    bate_cidade: bool
     mercado_confirmado: bool  # escopo bateu explicitamente um mercado aceito
     idioma_bateu_titulo: bool
 
@@ -1079,8 +1238,36 @@ class Job:
         também sempre False — só sinal INEQUÍVOCO de "há muito tempo"
         conta, não estimativa por ausência de dado.
         """
-        texto = _normalizar(self.publicado_em)
+        bruto = (self.publicado_em or "").strip()
+        if _PADRAO_DATA_ISO.match(bruto):
+            # Data absoluta (LinkedIn, via <time datetime=...>): da pra
+            # calcular a idade de verdade, sem depender do texto do card.
+            try:
+                publicada = date.fromisoformat(bruto)
+            except ValueError:
+                return False
+            hoje = datetime.now(timezone.utc).date()
+            return (hoje - publicada).days >= DIAS_PARA_PUBLICACAO_ANTIGA
+
+        texto = _normalizar(bruto)
         return "mes" in texto or "ano" in texto
+
+    @property
+    def publicado_em_legivel(self) -> str:
+        """publicado_em formatado pra leitura humana na notificacao.
+
+        "2026-03-26" no Telegram vira "Postada 2026-03-26", que se le mal em
+        portugues. Converte so a data ISO; qualquer outro formato (relativo,
+        absoluto do site, vazio) passa intacto — o texto original ja era o
+        que ia pra tela antes desta propriedade existir.
+        """
+        bruto = (self.publicado_em or "").strip()
+        if not _PADRAO_DATA_ISO.match(bruto):
+            return bruto
+        try:
+            return date.fromisoformat(bruto).strftime("%d/%m/%Y")
+        except ValueError:
+            return bruto
 
     @property
     def escopo_remoto(self) -> set[str]:
@@ -1231,8 +1418,12 @@ class Job:
             if not idioma_bateu_titulo:
                 bate_remoto = False
 
+        # _cidade_confere: nome batido nao basta quando o texto declara uma
+        # UF que contradiz a cidade (ver _UF_DA_CIDADE — "Campina Grande do
+        # Sul - PR" nao e Campina Grande/PB).
         bate_cidade = bate_remoto or any(
             _contem_termo(_normalizar(c), local_norm)
+            and _cidade_confere(_normalizar(c), local_norm)
             for c in regras.cidades
             if _normalizar(c) not in _FLAGS_REMOTO
         )
@@ -1262,10 +1453,35 @@ class Job:
             bate_ambiguo=bate_ambiguo,
             bate_ferramenta=bate_ferramenta,
             bate_remoto=bate_remoto,
+            bate_cidade=bate_cidade,
             escopos=escopos,
             mercado_confirmado=bate_remoto and bool(escopos),
             idioma_bateu_titulo=idioma_bateu_titulo,
         )
+
+    def rejeitada_so_pelo_cargo(self, regras: RegrasFiltro) -> bool:
+        """A vaga foi barrada SÓ pelo título, estando num local aceito?
+
+        Só pra diagnóstico (ver o contador em main.py) — não decide nada.
+
+        MEDIDO: uma vaga real da Lactalis ("Analista Comercial JR", Recife,
+        presencial) não foi notificada. O local passa; o título não bate
+        nenhuma das 36 keywords. Mas a descrição tem 5 dos 11 qualificadores
+        de dados — KPIs, dashboards, Power BI, Qlik Sense, modelagem — e é uma
+        vaga de BI com nome comercial.
+
+        O filtro lê só o TÍTULO. É o que mantém o ruído perto de zero (2.028
+        brutas viraram 439 no ciclo medido, sem lixo), e o preço simétrico é
+        justamente esse: título genérico com conteúdo de dados sempre escapa.
+
+        Ler a descrição de toda vaga custaria centenas de páginas por ciclo.
+        Ler só das que já estão numa cidade aceita seria barato — mas ninguém
+        sabe QUANTAS são por ciclo, e sem esse número a decisão vira palpite.
+        Este contador existe pra virar número antes de virar código.
+        """
+        av = self._avaliar(regras)
+        bate_keyword = av.bate_forte or av.bate_ambiguo or av.bate_ferramenta
+        return not bate_keyword and av.bate_cidade
 
     def pontuar_relevancia(self, regras: RegrasFiltro) -> int:
         """Score (1 a 10 na prática, ver MEDIDO abaixo) pra ORDENAR vagas

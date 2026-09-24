@@ -9,7 +9,7 @@ from core.config import (
     LOCATIONS_LINKEDIN_CIDADES_PRESENCIAL,
     LOCATIONS_LINKEDIN_REMOTO_APENAS,
 )
-from core.job import Job, _e_remoto, _normalizar, extrair_data_publicacao
+from core.job import Job, _e_remoto, _normalizar, extrair_data_do_card
 from core.logger import get_logger
 from scrapers.base import BaseScraper
 
@@ -41,6 +41,64 @@ MAX_PAGINAS_REMOTO = 2
 # cidades já é o triplo de requisições da passada nacional sozinha, então
 # manter enxuto aqui é o que evita esse custo virar desproporcional.
 MAX_PAGINAS_CIDADE = 1
+
+# POR QUE UMA BUSCA VAZIA AQUI NAO PROVA NADA (medido tres vezes, 29-30/08).
+#
+# O sintoma: buscas voltam sem card nenhum, concentradas nas passadas POR
+# CIDADE. Parecia obvio que era alarme falso -- cidade pequena com termo de
+# nicho nao tem vaga mesmo. Nao e: rodadas isoladas devolvem 8 a 10 cards
+# pras mesmas buscas. Entao ha vaga sendo perdida.
+#
+# HIPOTESE 1, DERRUBADA -- 'e bloqueio ao IP de datacenter do Actions':
+#
+#     ciclo no GitHub Actions (IP de datacenter) .... 13 buscas vazias
+#     ciclo na maquina da usuaria (IP residencial) .. 22 buscas vazias
+#
+#   Deu MAIS vazio no IP residencial. A conclusao anterior estava errada.
+#
+# HIPOTESE 2, DERRUBADA -- 'e a fila: o LinkedIn corta depois de N
+# requisicoes seguidas no mesmo ciclo':
+#
+#   Os 22 pares vazios do ciclo local foram repetidos ISOLADOS, do mesmo
+#   IP, 20 minutos depois. Se fosse a fila, todos voltariam com vaga.
+#   Voltaram 10 de 22:
+#
+#     mis analyst            Joao Pessoa      0 no ciclo -> 10 isolado
+#     mis analyst            Maceio           0 no ciclo -> 10 isolado
+#     mis analyst            Fortaleza        0 no ciclo -> 10 isolado
+#     reporting analyst      Caruaru          0 no ciclo -> 10 isolado
+#     data specialist        Caruaru          0 no ciclo -> 10 isolado
+#     data quality analyst   Maceio           0 no ciclo ->  9 isolado
+#     data intelligence an.  Caruaru          0 no ciclo ->  6 isolado
+#     data quality analyst   Campina Grande   0 no ciclo ->  2 isolado
+#     mis analyst            Brazil (remoto)  0 no ciclo -> 10 isolado
+#     mis analyst            Chile  (remoto)  0 no ciclo -> 10 isolado
+#
+#   e 12 continuaram vazios. E 'power bi'/Maceio fez o caminho inverso:
+#   10 cards numa medicao isolada de 29/08, 0 no ciclo de 30/08, 0 de novo
+#   na repeticao isolada de 30/08.
+#
+# O QUE SOBRA, E O QUE OS NUMEROS SUSTENTAM: mesmo IP, mesmo par, resposta
+# diferente em horas diferentes. Nem o IP nem a fila explicam. O formato da
+# resposta diz o resto -- quase todo resultado e 0 ou 10, pagina cheia ou
+# nada. Inventario real de cidade pequena com termo de nicho apareceria
+# como 1, 2, 3, 4. Bimodal assim e decisao de servidor, nao contagem de
+# vaga: o endpoint guest do LinkedIn as vezes serve a pagina e as vezes
+# devolve vazio, e nao da pra prever qual.
+#
+# JA TENTADO E MEDIDO COMO INUTIL -- NAO REFACA: repetir a busca dentro do
+# mesmo ciclo. Com pausa de 5s, depois com 10s e 30s. Resultado: 13 buscas
+# vazias, 13 repeticoes disparadas, 0 recuperacoes, e +9 minutos por ciclo.
+# A escala em que a resposta muda e de DEZENAS DE MINUTOS, nao de segundos
+# -- por isso esperar dentro do ciclo nao alcanca, e por isso o rodizio de
+# termos ja funciona como nova tentativa de graca: o mesmo par volta em
+# ciclos seguintes, e ai costuma vir cheio.
+#
+# CONCLUSAO PRATICA: busca vazia aqui e SINAL FRACO. Nao da pra distinguir
+# 'nao tem vaga' de 'o LinkedIn nao quis responder agora' -- por isso o
+# aviso abaixo nao afirma nem uma coisa nem outra. Ele serve pra ver
+# TENDENCIA no log (se um dia forem 200 e nao 20, mudou alguma coisa), nao
+# pra agir em cima de uma ocorrencia.
 
 
 class LinkedInScraper(BaseScraper):
@@ -76,7 +134,7 @@ class LinkedInScraper(BaseScraper):
 
     `locations_cidades_presencial`: uma cidade por busca (só passada
     nacional, sem f_WT=2) pras cidades de CIDADES em config.py — existe
-    porque a passada nacional acima (location="Brasil") não alcança essas
+    porque a passada nacional acima (location="Brazil") não alcança essas
     cidades quando o termo é concorrido em SP/RJ/MG (MEDIDO ao vivo: 3
     páginas de "analista de dados" em Brasil inteiro vieram só de capital
     grande). Busca por cidade específica não depende de volume nacional —
@@ -110,6 +168,10 @@ class LinkedInScraper(BaseScraper):
 
     def buscar_vagas(self) -> list[Job]:
         vagas: list[Job] = []
+        # Cada item: (termo, location, remoto, max_paginas, rotulo, momento).
+        # Preenchido por _buscar_termo quando a primeira pagina volta sem card.
+        self._vazias = []
+        self._registrar_vazias = True
         for termo in self.termos_busca:
             for location in self.locations:
                 vagas.extend(self._buscar_termo(termo, location, remoto=False))
@@ -121,6 +183,8 @@ class LinkedInScraper(BaseScraper):
                     termo, location, remoto=False,
                     max_paginas=MAX_PAGINAS_CIDADE, rotulo="cidade",
                 ))
+
+        vagas.extend(self._segunda_passada(vagas))
 
         total_mercados = (
             len(self.locations) + len(self.locations_remoto_apenas)
@@ -134,6 +198,66 @@ class LinkedInScraper(BaseScraper):
         )
         return vagas
 
+    def _segunda_passada(self, vagas_da_primeira: list[Job]) -> list[Job]:
+        """Repete, no FIM do ciclo, so as buscas que voltaram sem card nenhum.
+
+        POR QUE NO FIM E NAO NA HORA (isso ja foi medido e errado duas vezes):
+        repetir depois de 5s, 10s ou 30s deu 0 recuperacao em 13 tentativas. A
+        escala em que a resposta do LinkedIn muda e de DEZENAS DE MINUTOS. O
+        ciclo inteiro dura ~25 min, entao o fim do ciclo e o momento mais tarde
+        que da pra alcancar sem esperar de graca.
+
+        MEDIDO (30-31/08), que e o que justifica o custo:
+          · os 22 pares vazios de um ciclo, repetidos isolados ~20 min depois:
+            10 voltaram com vaga (8 a 10 cards cada).
+          · esperar o rodizio trazer o termo de volta (~9h) recuperou 12 de 22,
+            MAS deixou 5 pares com vaga comprovada vazios por DOIS ciclos
+            seguidos. Ou seja: o rodizio sozinho nao basta.
+
+        SEGURA POR CONSTRUCAO: so repete busca que ja voltou zero, entao no pior
+        caso volta zero de novo e nada piorou. Custo medido: ~25 buscas extras
+        em ~375, uns 2 min num ciclo de 25.
+
+        SE MEDE SOZINHA: o log diz quantos pares voltaram, quantas vagas vieram
+        e quantas delas eram INEDITAS neste ciclo (id que a primeira passada nao
+        tinha trazido por nenhum outro termo ou cidade). Se as ineditas forem ~0
+        por alguns ciclos, esta passada nao se paga e deve ser REMOVIDA -- esse
+        e o criterio, escrito antes de ver o resultado.
+        """
+        if not self._vazias:
+            return []
+
+        self._registrar_vazias = False
+        pendentes = self._vazias
+        logger.info(
+            f"[LinkedIn] Segunda passada: repetindo {len(pendentes)} busca(s) "
+            "que voltaram vazias na primeira."
+        )
+
+        recuperadas: list[Job] = []
+        pares_que_voltaram = 0
+        for termo, location, remoto, max_paginas, rotulo, momento in pendentes:
+            minutos = (time.monotonic() - momento) / 60
+            achadas = self._buscar_termo(
+                termo, location, remoto, max_paginas=max_paginas, rotulo=rotulo
+            )
+            if achadas:
+                pares_que_voltaram += 1
+                recuperadas.extend(achadas)
+                logger.info(
+                    f"[LinkedIn] Segunda passada recuperou {len(achadas)} vaga(s) "
+                    f"em '{termo}' ({location}) apos {minutos:.0f} min — a "
+                    "primeira foi resposta instável, não vaga zero."
+                )
+
+        ja_vistos = {v.id for v in vagas_da_primeira}
+        ineditas = [v for v in recuperadas if v.id not in ja_vistos]
+        logger.info(
+            f"[LinkedIn] Segunda passada: {pares_que_voltaram}/{len(pendentes)} "
+            f"par(es) voltaram com vaga, {len(recuperadas)} vaga(s) bruta(s), "
+            f"{len(ineditas)} inédita(s) neste ciclo."
+        )
+        return ineditas
     def _buscar_termo(
         self,
         termo: str,
@@ -175,11 +299,24 @@ class LinkedInScraper(BaseScraper):
                     time.sleep(2)
 
                     cards = page.query_selector_all("li")
+
                     if not cards:
                         if pagina == 0:
+                            # Guarda pra segunda passada no fim do ciclo. O
+                            # getattr protege quem chama _buscar_termo direto
+                            # (scripts de medicao), e o registrar=False evita
+                            # que a propria segunda passada se re-agende.
+                            if getattr(self, "_registrar_vazias", False):
+                                self._vazias.append((
+                                    termo, location, remoto, max_paginas,
+                                    rotulo, time.monotonic(),
+                                ))
                             logger.warning(
-                                f"[LinkedIn] Nenhum resultado retornado ({tag}) — provável "
-                                "bloqueio/rate-limit do LinkedIn nesse endpoint, ou 0 vaga real."
+                                f"[LinkedIn] Nenhum resultado retornado ({tag}) — pode "
+                                "ser ausência de vaga ou resposta instável do "
+                                "LinkedIn; medido, não dá pra distinguir os dois "
+                                "(ver o MEDIDO no topo deste arquivo). O rodízio "
+                                "de termos costuma recuperar em ciclos seguintes."
                             )
                         break
 
@@ -217,7 +354,16 @@ class LinkedInScraper(BaseScraper):
                                 continue
                             link = link.split("?")[0]
 
-                            publicado_em = extrair_data_publicacao(card.inner_text())
+                            # A tag <time> do card traz a data ABSOLUTA
+                            # (datetime="2026-03-26"). O texto traz "4
+                            # months ago", em ingles, que os padroes em
+                            # portugues nunca casavam — ver
+                            # extrair_data_do_card em core/job.py.
+                            el_data = card.query_selector("time")
+                            publicado_em = extrair_data_do_card(
+                                el_data.get_attribute("datetime") if el_data else None,
+                                card.inner_text(),
+                            )
 
                             vagas.append(Job(
                                 titulo=titulo,

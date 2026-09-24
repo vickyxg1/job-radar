@@ -30,10 +30,13 @@ from core.config import (
     ATIVAR_EIXO_IBERICO_BR,
     MERCADOS_REMOTO_ACEITOS,
     TERMOS_BUSCA,
+    TERMOS_PRIORITARIOS,
     TERMOS_POR_CICLO,
 )
 from core.config_intl import (
     KEYWORDS_INTL,
+    KEYWORDS_CARGO_AMBIGUO_INTL,
+    QUALIFICADORES_DADOS,
     TERMOS_BUSCA_INTL,
     TERMOS_POR_CICLO_INTL,
     LOCATIONS_INTL,
@@ -67,6 +70,7 @@ from scrapers.indeed_intl import IndeedIntlScraper
 from scrapers.jobs99 import Jobs99Scraper
 from scrapers.linkedin import LinkedInScraper
 from scrapers.linkedin_intl import LinkedInIntlScraper
+from scrapers.senior import SeniorScraper
 from scrapers.solides import SolidesScraper
 from scrapers.weworkremotely_intl import WeWorkRemotelyIntlScraper
 
@@ -105,6 +109,10 @@ class Perfil:
     termos_busca: list[str]
     termos_por_ciclo: int
     definicao_scrapers: list[DefinicaoScraper]
+    # Termos fora do rodízio, buscados em TODO ciclo (ver TERMOS_PRIORITARIOS
+    # em config.py). Lista vazia = tudo entra no rodízio, que é o
+    # comportamento de antes deste campo existir (perfil internacional).
+    termos_prioritarios: list[str] = field(default_factory=list)
     max_scrapers_concorrentes: int = 4
 
 
@@ -169,11 +177,96 @@ _SCRAPERS_BR = [
     DefinicaoScraper(GupyScraper, FREQUENCIA_ALTA),        # ~2,6% de rendimento
     DefinicaoScraper(LinkedInScraper, FREQUENCIA_ALTA),     # ~8,5% — a melhor fonte de longe
     DefinicaoScraper(SolidesScraper, FREQUENCIA_ALTA),      # ~1,1%
-    DefinicaoScraper(IndeedScraper, FREQUENCIA_ALTA),       # ~1,1%
+    # Indeed SAIU dos perfis (codigo continua em scrapers/indeed.py e
+    # scrapers/indeed_intl.py, mesmo tratamento que o Trampos recebeu).
+    #
+    # MEDIDO em 3 ciclos consecutivos de producao (18/08): ZERO vaga bruta,
+    # nas duas versoes. O log nao mostra "0 resultado" — mostra timeout na
+    # PAGINA 1 de todo termo, em todos os 6 dominios de pais. Isso e
+    # bloqueio anti-bot completo, nao ausencia de vaga. O proprio scraper ja
+    # avisava do risco: IP de nuvem/datacenter (que e o do GitHub Actions) e
+    # o mais bloqueado.
+    #
+    # Custo medido no relogio do log (os scrapers rodam em PARALELO, entao o
+    # que importa e quem termina por ultimo):
+    #
+    #   Brasil        11m32s — gargalo e o LinkedIn (21:40:55), nao o Indeed
+    #                 (21:33:42). Tirar daqui nao encurta o ciclo, so para
+    #                 de gastar requisicao a toa.
+    #   Internacional 25m42s — LinkedIn Intl termina 21:47:20 e o Indeed Intl
+    #                 so 22:06:38. Ele SOZINHO estende o ciclo em 19 minutos,
+    #                 entregando zero vaga.
+    #
+    # Ciclo completo: 37m14s -> ~18m. Sao ~2h30 por dia devolvidas.
+    #
+    # Pra religar quando/se o Indeed voltar a responder: descomente as duas
+    # linhas abaixo (uma aqui, outra em _SCRAPERS_INTL). Nada mais precisa
+    # mudar — imports, config e dominios continuam no lugar.
+    # DefinicaoScraper(IndeedScraper, FREQUENCIA_ALTA),       # ~1,1%
     DefinicaoScraper(CathoScraper, FREQUENCIA_BAIXA),       # <1%, timeout frequente em headless
     DefinicaoScraper(GeekHunterScraper, FREQUENCIA_BAIXA),  # <1%
     DefinicaoScraper(Jobs99Scraper, FREQUENCIA_BAIXA),      # <1%, fonte confirmada funcionando
     DefinicaoScraper(WeWorkRemotelyIntlScraper, FREQUENCIA_BAIXA),  # nova, sem medição própria
+    # MEDIDO ao vivo antes de ligar (3 termos, 398 vagas brutas): rendimento
+    # de 0,3% — abaixo da Sólides (1,1%), a fonte mais fraca que ficou. A
+    # busca da API casa pedaço de palavra, não o termo: "analista bi" trouxe
+    # ANALISTA CONTÁBIL, ANALISTA DE CUSTOS, ANALISTA LOGÍSTICA. E só 1 das
+    # 398 era remota — o portal é quase todo presencial, enquanto o remoto é
+    # de onde vem a maior parte do volume deste projeto.
+    #
+    # Entra assim mesmo, e em FREQUENCIA_BAIXA, por três motivos:
+    #
+    # 1. Custo. 398 vagas em 4 SEGUNDOS, sem navegador. A Sólides gasta
+    #    minutos pra render 1,1%. Por vaga útil, a conta favorece a Senior.
+    # 2. Cobre a área mais fraca. A única aprovada foi presencial em Natal —
+    #    e vaga presencial nas 8 cidades é o que o projeto menos acha (23 em
+    #    1.279 no histórico).
+    # 3. É a única fonte com data de publicação em 100% dos registros
+    #    (398/398), contra praticamente zero nas outras.
+    #
+    # FREQUENCIA_BAIXA também porque o endpoint só foi testado de máquina
+    # doméstica: o robô roda em IP de datacenter, que foi o que derrubou o
+    # Indeed. Uma execução por dia mede sem multiplicar requisição.
+    #
+    # Critério de permanência, pra decidir por número e não por impressão
+    # (mesmo critério que manteve o 99Jobs e tirou o Trampos): se numa semana
+    # não trouxer vaga relevante das 8 cidades, sai.
+    #
+    # ---- VEREDITO PARCIAL, 03/09 (15 dias no ar, ZERO vaga no banco) ----
+    #
+    # O critério acima já venceu. Antes de remover, foi diagnosticado, porque
+    # "não rende" e "está quebrada" pedem decisões opostas. MEDIDO: num ciclo
+    # completo ela trouxe 1.847 vagas brutas e 0 passaram no filtro.
+    #
+    # A FONTE NÃO ESTÁ QUEBRADA. O mapeamento sai correto e as vagas são de
+    # Dados de verdade:
+    #
+    #   Analista Engenharia de Dados Sênior      Igrejinha - RS         Híbrido
+    #   ANALISTA POWER BI JR                     Ituiutaba/Canápolis-MG
+    #   ANALISTA DE BUSINESS INTELLIGENCE PLENO  Goiânia                Presencial
+    #   ANALISTA CIÊNCIA E ARQ DADOS PL          Ponta Grossa - PR      Presencial
+    #
+    # Elas caem por CIDADE. A Senior tem vaga em Porto Alegre, Maringá,
+    # Blumenau, Veranópolis, Lajeado, Pelotas, Goiânia, Cuiabá, Ituiutaba --
+    # nenhuma das nove aceitas. A base de clientes dela é Sul/Sudeste; o mapa
+    # deste projeto é Nordeste mais Manaus. É incompatibilidade estrutural,
+    # não defeito.
+    #
+    # A única vaga REMOTA da sondagem (Business Analyst II (CIGAM), Pelotas,
+    # Remoto) foi rejeitada CORRETAMENTE: 'Business Analyst' é keyword ambígua
+    # e exige qualificador de dados no título. A mesma vaga como 'Business
+    # Analyst - Dados' passa. O filtro está certo.
+    #
+    # DECISÃO DA USUÁRIA: manter mais 15 dias, até 18/09. Custa ~30s por
+    # ciclo, e a aposta é vaga REMOTA -- remoto no Brasil vale em qualquer
+    # lugar, e a sondagem confirmou que a Senior publica vaga remota.
+    # Se em 18/09 continuar zero, sai sem discussão.
+    #
+    # O QUE MUDARIA O VEREDITO: se as cidades aceitas passarem a incluir
+    # Sul/Sudeste, esta fonte vira boa da noite pro dia -- ela já enxerga um
+    # volume de vaga de Dados que o projeto hoje descarta por geografia.
+    # Sondagem que produziu tudo isto: testar_senior.py.
+    DefinicaoScraper(SeniorScraper, FREQUENCIA_BAIXA),      # 0,3%, mas 4s e cobre cidade
 ]
 
 PERFIL_BR = Perfil(
@@ -187,14 +280,18 @@ PERFIL_BR = Perfil(
     eixo_secundario_rotulo="Ibéria",
     termos_busca=TERMOS_BUSCA,
     termos_por_ciclo=TERMOS_POR_CICLO,
+    termos_prioritarios=TERMOS_PRIORITARIOS,
     definicao_scrapers=_SCRAPERS_BR,
     max_scrapers_concorrentes=4,
 )
 
 
 # Regra primária: só remoto ("Remote"/"Remoto" em CIDADES_INTL), mercado
-# LATAM/Portugal/Espanha aceito. Sem cargo ambíguo/ferramenta ainda nesse
-# perfil — simples de propósito por ser o mais novo dos dois.
+# LATAM/Portugal/Espanha aceito.
+#
+# Cargo ambíguo entrou em 29/08 (ver KEYWORDS_CARGO_AMBIGUO_INTL em
+# config_intl.py para a medição): +7 vagas em 175, zero ruído. Ferramenta
+# continua fora — não foi medida.
 #
 # idiomas_exigidos: sem mercado declarado, exige espanhol/português/LATAM
 # no título (ver IDIOMAS_EXIGIDOS_INTL e comentário em RegrasFiltro) — a
@@ -202,8 +299,8 @@ PERFIL_BR = Perfil(
 # vaga em si.
 _REGRAS_INTL = RegrasFiltro(
     keywords_forte=KEYWORDS_INTL,
-    keywords_ambiguo=[],
-    qualificadores_dados=[],
+    keywords_ambiguo=KEYWORDS_CARGO_AMBIGUO_INTL,
+    qualificadores_dados=QUALIFICADORES_DADOS,
     ferramentas_titulo=[],
     qualificadores_cargo=[],
     cidades=CIDADES_INTL,
@@ -214,10 +311,14 @@ _REGRAS_INTL = RegrasFiltro(
 # Eixo secundário (Ibéria): vaga presencial/híbrida em Portugal/Espanha,
 # achada de propósito (LOCATIONS_INTL busca lá) mas que CIDADES_INTL (só
 # remoto) rejeitaria. DESLIGADO — mesmo motivo do eixo BR acima.
+# Mesmo cargo ambíguo da regra primária, de propósito: o eixo ibérico está
+# DESLIGADO hoje, então isto não muda comportamento nenhum agora. Mas deixar
+# os dois diferentes recriaria exatamente a divergência silenciosa que fez o
+# perfil internacional ficar sem o mecanismo por tanto tempo.
 _REGRAS_INTL_IBERIA = RegrasFiltro(
     keywords_forte=KEYWORDS_INTL,
-    keywords_ambiguo=[],
-    qualificadores_dados=[],
+    keywords_ambiguo=KEYWORDS_CARGO_AMBIGUO_INTL,
+    qualificadores_dados=QUALIFICADORES_DADOS,
     ferramentas_titulo=[],
     qualificadores_cargo=[],
     cidades=CIDADES_EUROPA_IBERICA,
@@ -228,7 +329,9 @@ _REGRAS_INTL_IBERIA = RegrasFiltro(
 # como o perfil BR. Ajustar quando/se tiver dado real.
 _SCRAPERS_INTL = [
     DefinicaoScraper(LinkedInIntlScraper, FREQUENCIA_ALTA, {"locations": LOCATIONS_INTL}),
-    DefinicaoScraper(IndeedIntlScraper, FREQUENCIA_ALTA, {"dominios": DOMINIOS_INDEED_INTL}),
+    # Indeed Intl desligado — ver MEDIDO em _SCRAPERS_BR. Era o gargalo
+    # absoluto do ciclo internacional: 19 dos 25 minutos, zero vaga.
+    # DefinicaoScraper(IndeedIntlScraper, FREQUENCIA_ALTA, {"dominios": DOMINIOS_INDEED_INTL}),
     DefinicaoScraper(WeWorkRemotelyIntlScraper, FREQUENCIA_ALTA),
 ]
 

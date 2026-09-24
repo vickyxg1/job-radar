@@ -145,3 +145,157 @@ def test_hora_configurada_entrega_de_manha_e_nao_de_madrugada(cenario, monkeypat
 
     _rodar(monkeypatch, hora_utc=10)  # 07h20 da manha em Brasilia
     assert len(cenario["enviadas"]) == 1, "digest tem que chegar de manha"
+
+
+# ------------------------------------------------- ALERTA DE SAUDE
+
+@pytest.mark.parametrize("com_problema, total, esperado", [
+    # 2 fontes: o caso que motivou a mudanca. Perfil Internacional ficou
+    # assim quando o Indeed foi desligado, e o WeWorkRemotely e pequeno o
+    # bastante pra voltar vazio num dia fraco.
+    (0, 2, False),
+    (1, 2, False),   # antes disparava aqui -- alerta falso
+    (2, 2, True),    # as duas cairam: e problema de verdade
+    # 3 fontes (perfil Brasil num ciclo normal): comportamento inalterado.
+    (1, 3, False),
+    (2, 3, True),
+    (3, 3, True),
+    # 7 fontes (Brasil no ciclo que roda as de baixa frequencia).
+    (3, 7, False),
+    (4, 7, True),
+    # numero par maior: fica um pouco mais exigente, de proposito.
+    (4, 8, False),
+    (5, 8, True),
+    # nenhuma fonte no ciclo: nao ha o que alertar.
+    (0, 0, False),
+])
+def test_alerta_de_saude_exige_maioria_estrita(com_problema, total, esperado):
+    """Alerta que dispara sem motivo deixa de ser lido -- e ai nao serve nem
+    quando o problema e real."""
+    assert main._deve_alertar_saude(com_problema, total) is esperado
+
+
+# --------------------------------------------- RODIZIO DE TERMOS DE BUSCA
+
+class _PerfilFalso:
+    def __init__(self, termos, por_ciclo, prioritarios=()):
+        self.chave = "teste"
+        self.termos_busca = list(termos)
+        self.termos_por_ciclo = por_ciclo
+        self.termos_prioritarios = list(prioritarios)
+
+
+@pytest.fixture
+def metadados(monkeypatch):
+    estado = {}
+    monkeypatch.setattr(main, "obter_metadado", lambda c: estado.get(c))
+    monkeypatch.setattr(main, "definir_metadado", lambda c, v: estado.__setitem__(c, v))
+    return estado
+
+
+def test_prioritarios_entram_em_todo_ciclo(metadados):
+    """MEDIDO: uma vaga real ("Analista de Dados", Recife) nunca foi buscada
+    porque o termo so passava a cada 13 horas no rodizio alfabetico."""
+    perfil = _PerfilFalso(list("abcdefghij") + ["ALVO"], por_ciclo=3, prioritarios=["ALVO"])
+    for _ in range(6):
+        assert "ALVO" in main._proximo_bloco_termos(perfil)
+
+
+def test_prioritario_nao_ocupa_vaga_do_rodizio(metadados):
+    perfil = _PerfilFalso(list("abcdef") + ["ALVO"], por_ciclo=3, prioritarios=["ALVO"])
+    bloco = main._proximo_bloco_termos(perfil)
+    assert len(bloco) == 4                 # 1 prioritario + 3 do rodizio
+    assert bloco[0] == "ALVO"
+    assert set(bloco[1:]).issubset(set("abcdef"))
+
+
+def test_rodizio_cobre_todos_os_termos_nao_prioritarios(metadados):
+    perfil = _PerfilFalso(list("abcdefghi") + ["ALVO"], por_ciclo=3, prioritarios=["ALVO"])
+    vistos = set()
+    for _ in range(3):
+        vistos.update(main._proximo_bloco_termos(perfil))
+    assert vistos == set("abcdefghi") | {"ALVO"}
+
+
+def test_prioritario_nao_e_repetido_no_rodizio(metadados):
+    """Termo prioritario sai do conjunto que rotaciona -- senao ele apareceria
+    duas vezes no mesmo ciclo, gastando busca a toa."""
+    perfil = _PerfilFalso(["a", "ALVO", "b", "c"], por_ciclo=3, prioritarios=["ALVO"])
+    bloco = main._proximo_bloco_termos(perfil)
+    assert bloco.count("ALVO") == 1
+
+
+def test_sem_prioritarios_o_comportamento_e_o_de_antes(metadados):
+    """Perfil internacional nao usa prioritarios: rodizio puro."""
+    perfil = _PerfilFalso(list("abcdef"), por_ciclo=2)
+    assert main._proximo_bloco_termos(perfil) == ["a", "b"]
+    assert main._proximo_bloco_termos(perfil) == ["c", "d"]
+    assert main._proximo_bloco_termos(perfil) == ["e", "f"]
+    assert main._proximo_bloco_termos(perfil) == ["a", "b"]
+
+
+def test_prioritario_fora_da_lista_de_busca_e_ignorado(metadados):
+    perfil = _PerfilFalso(["a", "b"], por_ciclo=1, prioritarios=["NAO_EXISTE"])
+    assert main._proximo_bloco_termos(perfil) == ["a"]
+
+
+def test_todos_prioritarios_e_nenhum_rodizio(metadados):
+    perfil = _PerfilFalso(["a", "b"], por_ciclo=3, prioritarios=["a", "b"])
+    assert main._proximo_bloco_termos(perfil) == ["a", "b"]
+
+
+# ---- o que decide chegar na hora ou esperar o resumo (10/09/2026) ----
+
+def test_a_vaga_da_olx_chega_na_hora_e_nao_no_digest():
+    """REGRESSÃO com nome e sobrenome. Em 09/09 esta vaga foi encontrada, foi
+    aprovada, foi notificada — e a usuária não viu, porque tirou nota 6 contra
+    um limiar de 7 e caiu no resumo da manhã seguinte.
+
+    O caso é real: Grupo OLX, via Gupy, remota. A Gupy não declara localização
+    de vaga remota, então `local` vem "Não informado" e o score desconta o
+    ponto de "mercado não confirmado" — foi esse único ponto que a separou do
+    alerta imediato.
+
+    Este teste pina a decisão de baixar o limiar pra 4 num caso concreto, e não
+    no número solto: se alguém devolver o limiar pra 7, é esta vaga que quebra,
+    com o nome dela no output.
+    """
+    from core.config import LIMIAR_DIGEST_IMEDIATO
+    from core.job import Job
+    from core.perfis import PERFIL_BR
+
+    vaga = Job(
+        titulo="Analista de Dados Pleno (Vaga Afirmativa para Pessoas Com Deficiência)",
+        empresa="Grupo OLX",
+        local="Não informado",
+        link="https://vemsergrupoolx.gupy.io/job/eyJqb2JJZCI6MTI0MTQ3MTAsInNvdXJjZSI6Imd1cHlfcG9ydGFsIn0=",
+        site="Gupy",
+        publicado_em="2026-09-09",
+        modalidade="Remoto",
+    )
+    assert vaga.combina_com(PERFIL_BR.regras), "a vaga tem que continuar sendo aprovada"
+    assert vaga.pontuar_relevancia(PERFIL_BR.regras) == 6, (
+        "se a nota mudou, a decisão de limiar foi tomada com outro número"
+    )
+    assert vaga.pontuar_relevancia(PERFIL_BR.regras) >= LIMIAR_DIGEST_IMEDIATO, (
+        "vaga de Analista de Dados Pleno remota no Brasil tem que chegar na hora"
+    )
+
+
+def test_ruido_de_nota_baixa_continua_no_digest():
+    """O outro lado: baixar o limiar não pode ser o mesmo que desligar o digest.
+    Vaga sênior fora do alvo continua agrupada."""
+    from core.config import LIMIAR_DIGEST_IMEDIATO
+    from core.job import Job
+    from core.perfis import PERFIL_BR
+
+    vaga = Job(
+        titulo="Senior Data Analyst - B2B",
+        empresa="X",
+        local="Barcelona, Catalonia, Spain",
+        link="x",
+        site="LinkedIn",
+        publicado_em="2026-09-09",
+        modalidade="Remoto",
+    )
+    assert vaga.pontuar_relevancia(PERFIL_BR.regras) < LIMIAR_DIGEST_IMEDIATO

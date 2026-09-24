@@ -56,6 +56,29 @@ KEYWORDS_CARGO_AMBIGUO = [
     "Analista de Negócios",
     "Business Analytics",
     "Analista de Performance",
+    # MEDIDO (2026-08-22) contra 293 vagas reais do LinkedIn (4 termos, 4
+    # mercados): "Analyst" sozinho trouxe 2 vagas a mais, as DUAS certas —
+    # "Data & Analytics Analyst" (Oliver Wyman, Lisboa) e "Analytics Analyst
+    # - Remote Work" (Jalisco). Zero ruído na amostra.
+    #
+    # A Oliver Wyman e a Air Liquide ("Business & Data Integration Analyst -
+    # HR Analytics") apareceram no log do dia anterior como barradas só pelo
+    # título: sao vagas de dados que nenhuma keyword cobria, porque a lista
+    # tem os cargos COMPOSTOS ("Data Analyst", "BI Analyst") e não o
+    # substantivo sozinho.
+    #
+    # O risco previsto era "Data Center Operations Analyst" — "data center"
+    # casa o qualificador "data" sem ter nada a ver com análise. Medido: não
+    # apareceu nenhuma vez nas 293. Se aparecer, é aqui que se olha.
+    #
+    # NÃO entraram, e por quê:
+    #   "Especialista" — 0 vagas a mais na mesma amostra. A vaga que motivou
+    #       a ideia ("Especialista de Inteligencia de Negocio (BI)", TeleVía)
+    #       não caiu na coleta. Sem número seria palpite.
+    #   "Analista"     — 3 a mais, mas 2 eram "Analista de Banco de Dados".
+    #       DBA é outra profissão, mesma razão que mantém "desenvolvedor" e
+    #       "engenheiro" fora. Decisão da usuária em 22/08.
+    "Analyst",
 ]
 
 # Termo que precisa aparecer junto no título quando o cargo é ambíguo, pra
@@ -143,6 +166,32 @@ TERMOS_FERRAMENTA = [
 
 TERMOS_BUSCA = TERMOS_CARGO + TERMOS_FERRAMENTA
 
+# Termos que rodam em TODO ciclo, fora do rodízio.
+#
+# MEDIDO: uma vaga real ("Analista de Dados", JCPM Shoppings, Recife) não
+# foi notificada. O título bate a keyword mais forte da lista e o local é
+# uma das 8 cidades — passaria no filtro sem esforço. Ela nunca chegou a ser
+# BUSCADA: com 44 termos e 10 por ciclo, uma volta completa leva 13 horas, e
+# o rodízio é alfabético — "analista de dados" disputa vez de igual pra igual
+# com "bigquery" e "looker". Vaga publicada logo depois da passagem do termo
+# fica invisível por meio dia, e em portal que recebe vaga o tempo todo isso
+# é tempo demais.
+#
+# Prioridade não é sobre volume, é sobre o que define o perfil: são os
+# títulos que a usuária de fato procura, e os que mais aparecem nas vagas
+# que já foram aprovadas. Passam de 1x a cada 13h para 8x por dia.
+#
+# Custo: bloco por ciclo vai de 10 para 15 termos (+50%). O ciclo medido é
+# de 18 min desde que o Indeed saiu, então cabe — antes disso, com 37 min,
+# não caberia. É essa folga que torna a mudança possível agora.
+TERMOS_PRIORITARIOS = [
+    "analista de dados",
+    "analista de bi",
+    "business intelligence",
+    "data analyst",
+    "power bi",
+]
+
 # Medido: os TERMOS_BUSCA inteiros (hoje 42) rodando em TODO ciclo é o que
 # gera as centenas de sessões de navegador por execução — o custo cresce
 # linear com o tamanho da lista, e a lista só cresce (mais ainda com a
@@ -190,6 +239,15 @@ CIDADES = [
     # Mantidas por decisao da usuaria, alem do requisito minimo
     "Maceió",
     "Aracaju",
+    # Fortaleza-CE: pedida em 21/08/2026, presencial e híbrida como as
+    # demais. Cuidado que ela exige: existem "Fortaleza de Minas" (MG),
+    # "Fortaleza dos Nogueiras" (MA) e "Fortaleza dos Valos" (RS) — as três
+    # batem o nome. Quem as barra é _UF_DA_CIDADE["fortaleza"] = "ce" em
+    # job.py, e ela só funciona pro formato do LinkedIn ("Fortaleza de
+    # Minas, Minas Gerais, Brazil") desde 5e91895, que ensinou a guarda a
+    # ler estado por extenso. Sem aquele commit, esta cidade entraria com
+    # três falsos positivos junto.
+    "Fortaleza",
 ]
 
 # MEDIDO: "Data Analyst @ Lisboa" e "Analista de Datos @ Madrid" reprovavam
@@ -235,7 +293,23 @@ ATIVAR_EIXO_IBERICO_BR = False
 #
 # Mercado "casa": busca modalidade completa (presencial/híbrida + remoto),
 # porque o usuário mora aqui e vaga local de verdade interessa.
-LOCATIONS_LINKEDIN = ["Brasil"]
+# MEDIDO (2026-08-20): o endpoint de visitante do LinkedIn NÃO resolve
+# "Brasil" — e não devolve erro. Ele devolve um resultado genérico dos EUA
+# (Evansville-IN, Sandy-UT, Port Angeles-WA...), o MESMO que devolve pra
+# qualquer location que ele não entende. Testado ao vivo, mesmo termo:
+#     location="Brasil"  ->  10 vagas,  0 no Brasil
+#     location="Brazil"  ->  10 vagas,  8 no Brasil
+#
+# Efeito no histórico: das 910 vagas que o LinkedIn já tinha trazido pro
+# perfil BR, 281 eram dos EUA (o filtro descartava depois, mas elas ocupavam
+# o orçamento de 20 resultados por termo) e só 19 eram do Brasil — e essas
+# 19 vieram das buscas POR CIDADE, que resolvem normalmente. A passada
+# nacional nunca trouxe uma vaga brasileira sequer.
+#
+# Foi assim que "Analista de Business Intelligence Pleno (Remoto)" da Vitru
+# (Brasil/Remoto, relevância 7, APROVADA pelo filtro) nunca chegou a ser
+# vista: ela é exatamente o caso que a passada nacional deveria cobrir.
+LOCATIONS_LINKEDIN = ["Brazil"]
 
 # Mercados adicionais: só busca REMOTA (f_WT=2) — vaga presencial/híbrida
 # num país onde o usuário não mora não serve, então nem faz sentido gastar
@@ -247,9 +321,21 @@ LOCATIONS_LINKEDIN = ["Brasil"]
 # (LOCATIONS_INTL) — evita arriscar nome de país nunca testado (grafia
 # errada ou região que o LinkedIn não resolve como location de verdade,
 # como já visto com "LATAM"/"Latin America").
-LOCATIONS_LINKEDIN_REMOTO_APENAS = ["Argentina", "Chile", "México", "Colômbia", "Espanha", "Portugal"]
+#
+# CORRIGIDO (2026-08-20): esta lista dizia reaproveitar LOCATIONS_INTL, mas
+# "México" e "Colômbia" tinham sido traduzidos pro português — e o LinkedIn
+# não resolve nenhum dos dois. Medido ao vivo, mesmo termo:
+#     "México"   -> 10 vagas,  0 no México  |  "Mexico"   -> 10, 10 no México
+#     "Colômbia" ->  0 vagas               |  "Colombia" -> 10, 10 na Colômbia
+# E no banco: o perfil internacional (LOCATIONS_INTL, em inglês) tinha 110
+# vagas do México e 48 da Colômbia; o perfil BR, zero de cada.
+#
+# "Espanha" FICA como está: foi medido e resolve (9 de 10 na Espanha, 215
+# vagas no histórico). Argentina/Chile/Portugal se escrevem igual nos dois
+# idiomas. Ou seja: só muda o que está comprovadamente quebrado.
+LOCATIONS_LINKEDIN_REMOTO_APENAS = ["Argentina", "Chile", "Mexico", "Colombia", "Espanha", "Portugal"]
 
-# MEDIDO: a passada nacional acima (location="Brasil") varre o país inteiro
+# MEDIDO: a passada nacional acima (location="Brazil") varre o país inteiro
 # e só sobra o que bate em CIDADES depois do filtro — pra termo concorrido
 # em SP/RJ/MG (a maioria), as 3 páginas (30 resultados) nunca chegam numa
 # vaga de cidade menor do Nordeste, porque o volume dos polos maiores
@@ -287,18 +373,47 @@ MERCADOS_REMOTO_ACEITOS = ["Brasil", "LATAM", "Argentina", "Chile", "México", "
 INTERVALO_MINUTOS = int(os.getenv("INTERVALO_MINUTOS", 180))
 
 # Digest ranqueado (item 08): vaga com Job.pontuar_relevancia() >= este
-# limiar notifica na hora (como sempre foi); abaixo disso, fica na fila do
-# digest diário — ver _enviar_digest_diario em main.py.
+# limiar notifica na hora; abaixo disso, fica na fila do digest diário — ver
+# _enviar_digest_diario em main.py. Vaga com publicacao_antiga vai pro digest
+# mesmo com nota alta, e isso não mudou: score mede "bate com o que você
+# procura", não "é recente".
 #
-# MEDIDO: rodei o score contra as ~305 vagas do jobs.db real que ainda
-# batem as regras atuais. Distribuição: score 4 (2%), 5 (24%), 6 (67%),
-# 7 (5%), 8 (2%) — nada em 9-10 na amostra (exige acertar praticamente
-# todo sinal ao mesmo tempo: cargo forte + ferramenta + senioridade alvo +
-# mercado confirmado). Limiar 7 deixa ~7% imediata e ~93% no digest — bate
-# com o pedido ("vaga de score alto na hora, resto agrupado"); 6 deixava
-# 74% imediata (pouca redução de ruído); 8 deixava só 2% (digest com
-# praticamente tudo, quase nenhuma vaga "excelente" se destacando na hora).
-LIMIAR_DIGEST_IMEDIATO = 7
+# ERA 7 ATÉ 10/09/2026. Baixou pra 4 a pedido da usuária, e o motivo tem
+# nome: vaga boa estava se perdendo dentro do digest. O caso que abriu a
+# discussão foi "Analista de Dados Pleno (Vaga Afirmativa para PCD)" do Grupo
+# OLX, remota, encontrada em 09/09 — nota 6, um ponto abaixo do limiar, então
+# foi pro resumo da manhã seguinte em vez de chegar na hora.
+#
+# MEDIDO (10/09) contra as 542 vagas dos 10 dias anteriores. A simulação
+# reproduziu a nota guardada de todas as 542, sem uma divergência, então os
+# números abaixo são do comportamento real e não de estimativa:
+#
+#     limiar   imediatas/dia   ficam no digest/dia
+#        7           7,1              47,1          <- como era
+#        6          37,0              17,2
+#        5          42,0              12,2
+#        4          42,2              12,0          <- escolhido
+#        3          51,8               2,4
+#
+# 5 e 4 dão praticamente o mesmo resultado porque quase não há vaga com nota
+# 4 (1 em 542). O que separa mesmo é 7 -> 6: são as vagas de nota 6, o maior
+# grupo da base, e é onde estava a da OLX.
+#
+# O QUE ISSO CUSTA, dito claramente: ~42 mensagens individuais por dia, em
+# rajadas de ~5 a cada ciclo de 3h. O digest existia justamente pra evitar
+# isso. A troca foi feita de olhos abertos, com o número na mão.
+#
+# ALTERNATIVA MEDIDA E NÃO ESCOLHIDA, registrada porque resolve o mesmo caso
+# por outro caminho e continua disponível: o score desconta 1 ponto de vaga
+# remota "sem mercado declarado" (_PESO_MERCADO_NAO_CONFIRMADO em job.py).
+# No perfil BRASIL esse desconto não faz sentido — remoto no Brasil vale em
+# qualquer lugar pela regra de negócio, não há mercado a confirmar. Corrigir
+# só isso, mantendo o limiar em 7, levaria de 7,1 para 7,7 mensagens/dia e
+# traria 6 vagas em 10 dias: todas "Analista de Dados" Jr/Pleno remotas do
+# perfil BR, incluindo exatamente a da OLX. No perfil INTERNACIONAL o
+# desconto continua certo, porque lá só valem mercados de língua portuguesa
+# e espanhola e a confirmação importa de verdade.
+LIMIAR_DIGEST_IMEDIATO = 4
 
 # Hora UTC a partir da qual o digest diário pode sair (uma vez por perfil,
 # por dia — ver _enviar_digest_diario em main.py). A regra é "ainda não

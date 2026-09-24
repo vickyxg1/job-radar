@@ -64,8 +64,9 @@ def _construir_scrapers(perfil: Perfil, termos_busca: list[str]):
 
 
 def _proximo_bloco_termos(perfil: Perfil) -> list[str]:
-    """Rodízio: cada ciclo pega um BLOCO fixo (perfil.termos_por_ciclo) de
-    perfil.termos_busca, começando de onde o ciclo anterior parou, e avança
+    """Termos deste ciclo: os PRIORITÁRIOS (todo ciclo, fora do rodízio) mais
+    um BLOCO fixo (perfil.termos_por_ciclo) do resto, começando de onde o
+    ciclo anterior parou e avançando
     — volta pro início quando chega no fim da lista. A posição fica salva
     no jobs.db (tabela metadados, chave com sufixo do perfil — dois perfis
     rotacionam de forma independente), então sobrevive entre execuções do
@@ -76,9 +77,21 @@ def _proximo_bloco_termos(perfil: Perfil) -> list[str]:
     continua custando o mesmo. Sem isso, dobrar a lista de termos dobrava o
     tempo de TODO ciclo.
     """
-    total = len(perfil.termos_busca)
+    # MEDIDO: uma vaga real ("Analista de Dados", JCPM Shoppings, Recife)
+    # nunca foi notificada — e nao por causa do filtro: o titulo bate a
+    # keyword mais forte da lista e Recife e uma das 8 cidades. Ela nunca
+    # chegou a ser BUSCADA. Com 44 termos e 10 por ciclo, uma volta completa
+    # leva 13 horas, e o rodizio e alfabetico: "analista de dados" disputa vez
+    # de igual pra igual com "bigquery" e "looker".
+    #
+    # perfil.termos_prioritarios sai do rodizio e entra em TODO ciclo. Os
+    # demais continuam rodando como antes, so que num conjunto menor.
+    prioritarios = [t for t in perfil.termos_prioritarios if t in perfil.termos_busca]
+    rodizio = [t for t in perfil.termos_busca if t not in prioritarios]
+
+    total = len(rodizio)
     if total == 0:
-        return []
+        return list(prioritarios)
 
     tamanho_bloco = min(perfil.termos_por_ciclo, total)
 
@@ -89,11 +102,11 @@ def _proximo_bloco_termos(perfil: Perfil) -> list[str]:
     # tamanho atual da lista quebraria o acesso por índice abaixo.
     offset = int(offset_salvo) % total if offset_salvo else 0
 
-    bloco = [perfil.termos_busca[(offset + i) % total] for i in range(tamanho_bloco)]
+    bloco = [rodizio[(offset + i) % total] for i in range(tamanho_bloco)]
 
     definir_metadado(chave_offset, str((offset + tamanho_bloco) % total))
 
-    return bloco
+    return list(prioritarios) + bloco
 
 
 def _enviar_heartbeat_diario(
@@ -219,12 +232,44 @@ def _enviar_digest_diario(perfil: Perfil):
         )
 
 
+def _deve_alertar_saude(com_problema: int, total: int) -> bool:
+    """A maioria ESTRITA das fontes falhou neste ciclo?
+
+    MEDIDO: a regra era ">= metade", o que com 2 fontes significa que UMA
+    sozinha ja dispara o alerta. Isso passou a importar quando o Indeed foi
+    desligado e o perfil Internacional ficou com 2 fontes: o WeWorkRemotely e
+    pequeno (5 vagas no ciclo medido, vazio em 9 dos 10 termos), entao um dia
+    mais fraco viraria "JobRadar com problema" sem haver problema nenhum.
+
+    Alerta que dispara sem motivo e pior que alerta que nao existe: depois de
+    duas ou tres vezes, ele deixa de ser lido -- e ai nao serve mais nem
+    quando o problema e real.
+
+    Maioria ESTRITA (">" em vez de ">=") resolve sem enfraquecer o resto:
+
+        2 fontes -> exige 2 (antes 1)  <- o caso que motivou a mudanca
+        3 fontes -> exige 2 (igual)
+        7 fontes -> exige 4 (igual)
+        8 fontes -> exige 5 (antes 4)
+
+    Ou seja: com 2 fontes o alerta passa a significar "as duas cairam", que e
+    o que "com problema" deveria querer dizer.
+    """
+    if total <= 0:
+        return False
+    return com_problema > total / 2
+
 def ciclo_de_busca(perfil: Perfil):
     total_novas = 0
     total_brutas = 0
     total_filtradas = 0
     scrapers_com_problema = []
     descartes_escopo_ciclo: Counter = Counter()
+    # Diagnóstico (ver Job.rejeitada_so_pelo_cargo): vaga numa das cidades
+    # aceitas que só não passou porque o título não bate keyword nenhuma.
+    # Existe pra medir se vale abrir a descrição dessas vagas — hoje o filtro
+    # lê só o título, e vaga de BI com nome comercial escapa.
+    titulo_barrou_em_cidade: list[str] = []
 
     termos_do_ciclo = _proximo_bloco_termos(perfil)
     logger.info(
@@ -268,6 +313,13 @@ def ciclo_de_busca(perfil: Perfil):
             total_brutas += len(vagas)
             vagas_filtradas, descartes = filtrar_vagas(vagas, perfil.regras)
             descartes_escopo_ciclo.update(descartes)
+
+            ids_aprovadas = {v.id for v in vagas_filtradas}
+            titulo_barrou_em_cidade.extend(
+                f"{v.titulo} — {v.empresa} ({v.local})"
+                for v in vagas
+                if v.id not in ids_aprovadas and v.rejeitada_so_pelo_cargo(perfil.regras)
+            )
 
             # Eixo secundário (Ibéria, quando ligado): mesma regra de cargo,
             # cidade diferente — sem duplicar o que já bateu na regra
@@ -384,11 +436,25 @@ def ciclo_de_busca(perfil: Perfil):
         )
         logger.info(f"[{perfil.nome}] Descarte por escopo: {detalhe}")
 
+    # MEDIDO: uma vaga real ("Analista Comercial JR", Lactalis, Recife) não
+    # foi notificada — local aceito, título sem nenhuma das 36 keywords, mas a
+    # descrição com 5 dos 11 qualificadores de dados. Este contador mede
+    # quantas vagas por ciclo caem nesse caso, pra decidir por número (e não
+    # por palpite) se vale abrir a descrição delas. Mostra até 10 exemplos —
+    # o suficiente pra julgar se são vagas de verdade ou ruído.
+    if titulo_barrou_em_cidade:
+        logger.info(
+            f"[{perfil.nome}] Em cidade aceita, barradas só pelo título: "
+            f"{len(titulo_barrou_em_cidade)}"
+        )
+        for exemplo in titulo_barrou_em_cidade[:10]:
+            logger.info(f"[{perfil.nome}]   · {exemplo}")
+
     # Alerta de saúde: se a maioria das fontes falhou/voltou vazia, avisa no
     # Telegram. Sem isso, um bloqueio geral ou mudança de layout passaria
     # despercebido — o workflow do GitHub Actions continuaria "verde" mesmo
     # com tudo quebrado.
-    if scrapers and len(scrapers_com_problema) >= len(scrapers) / 2:
+    if _deve_alertar_saude(len(scrapers_com_problema), len(scrapers)):
         enviar_mensagem(
             f"⚠️ <b>JobRadar {perfil.nome} com problema</b>\n\n"
             f"{len(scrapers_com_problema)}/{len(scrapers)} fontes falharam ou voltaram "
@@ -432,8 +498,8 @@ def main():
         nargs="+",
         choices=sorted(PERFIS.keys()),
         help=(
-            "Qual(is) mercado(s) rodar nesta execução — 'brasil', 'internacional', "
-            "ou os dois (--perfil brasil internacional)."
+            "Qual(is) mercado(s) rodar nesta execução — 'brasil', 'internacional', 'dev', "
+            "ou combinação (--perfil brasil internacional dev)."
         ),
     )
     parser.add_argument(
