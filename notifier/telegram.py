@@ -4,6 +4,7 @@ import json
 import requests
 
 from core.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from core.skill_match import calcular_match
 from database.database import definir_feedback, definir_metadado, obter_metadado
 from core.logger import get_logger
 
@@ -102,14 +103,50 @@ def _linha_aviso_antiga(job) -> str:
     return f"⚠️ <b>Postada {job.publicado_em}</b> — pode já estar preenchida.\n"
 
 
-def notificar_vaga(job) -> bool:
-    # TODO (Fase 3): incluir aqui a % de compatibilidade com o currículo,
-    # calculada por IA, quando essa etapa for implementada.
-    #
+def _linha_match_skills(job, perfil_chave: str) -> str:
+    """Item 7 do roadmap: cobertura de skill determinística (ver
+    core/skill_match.py) — só faz sentido pro perfil "dev" (a lista de
+    skill, QUALIFICADORES_DEV, é da stack JS do dono desse perfil; mostrar
+    isso numa vaga de Dados/BI seria comparar com a lista errada). Some
+    quando nenhuma skill bate — 0% em toda vaga que passou no filtro por
+    OUTRO motivo (cargo forte, por exemplo, não exige tech no título) é
+    ruído, não informação.
+    """
+    if perfil_chave != "dev":
+        return ""
+    resultado = calcular_match(f"{job.titulo} {job.descricao}")
+    if not resultado["batidas"]:
+        return ""
+    linha = f"🎯 <b>Match de stack:</b> {resultado['cobertura_percent']}% ({', '.join(resultado['batidas'])})"
+    if resultado["ausentes"]:
+        linha += f" — falta: {', '.join(resultado['ausentes'])}"
+    return linha + "\n"
+
+
+def _linha_mercado(job) -> str:
+    """Badge de país/mercado normalizado — Job.escopo_remoto já roda por
+    baixo dos panos pra decidir o filtro (ver RegrasFiltro.mercados_remoto_
+    aceitos em job.py), mas até aqui nunca virava linha visível no card,
+    só texto cru de `local` (que pode vir "Remote — UK", uma cidade, sede
+    da empresa etc — nem sempre óbvio de bater o olho). Não repete Local
+    quando os dois diriam a mesma coisa (ex: local já é só "Brasil").
+    Conjunto vazio = sem escopo declarado no texto — não é erro, é
+    "remoto sem restrição", não tem país nenhum pra badge mostrar.
+    """
+    escopos = job.escopo_remoto
+    if not escopos:
+        return ""
+    return f"<b>Mercado:</b> {', '.join(sorted(escopos))}\n"
+
+
+def notificar_vaga(job, perfil_chave: str = "") -> bool:
     # Linha de publicação só aparece quando a fonte expõe isso (nem toda
     # expõe — ver Job.publicado_em / extrair_data_publicacao em job.py).
     linha_publicacao = f"<b>Publicada:</b> {job.publicado_em}\n" if job.publicado_em else ""
     linha_modalidade = f"<b>Modalidade:</b> {job.modalidade}\n" if job.modalidade else ""
+    linha_mercado = _linha_mercado(job)
+    linha_nota_extra = f"{job.nota_extra}\n" if job.nota_extra else ""
+    linha_match_skills = _linha_match_skills(job, perfil_chave)
     texto = (
         f"🚨 <b>Nova vaga encontrada!</b>\n\n"
         f"{_linha_aviso_antiga(job)}"
@@ -120,8 +157,11 @@ def notificar_vaga(job) -> bool:
         f"<b>Nível:</b> {job.senioridade}\n"
         f"<b>Local:</b> {job.local}\n"
         f"{linha_modalidade}"
+        f"{linha_mercado}"
         f"<b>Site:</b> {job.site}\n"
-        f"{linha_publicacao}\n"
+        f"{linha_publicacao}"
+        f"{linha_nota_extra}"
+        f"{linha_match_skills}\n"
         f"Encontrada agora\n\n"
         f"<b>Link:</b>\n{job.link}"
     )

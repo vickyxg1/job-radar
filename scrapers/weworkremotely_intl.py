@@ -6,9 +6,36 @@ from playwright.sync_api import sync_playwright
 
 from core.job import Job, extrair_data_publicacao
 from core.logger import get_logger
+from core.sponsorship import detect_sponsorship
 from scrapers.base import BaseScraper
 
 logger = get_logger()
+
+# Item 6 do roadmap (Pessoal/ROADMAP-freehire-para-job-radar.md): primeira
+# fonte a visitar a página da própria vaga, não só o card de busca — é o
+# que permite ler o texto completo do anúncio e rodar
+# core.sponsorship.detect_sponsorship() nele. Escolhida por ser a fonte de
+# MENOR risco pra essa validação: não é a fonte de maior rendimento
+# (LinkedIn, ~8,5%, não vale arriscar bloqueio nela) nem uma que já falhou
+# por bloqueio de bot antes (ver zero-resultado documentado mais abaixo
+# neste arquivo).
+#
+# SELETOR NÃO CONFIRMADO AO VIVO: sandbox deste ambiente não baixa
+# browser real (mesma limitação já documentada nos comentários de
+# card_search abaixo), então a lista de seletores candidatos é a melhor
+# estrutura conhecida do site, não uma confirmação — precisa validar no
+# próximo ciclo real de produção (ver aviso de log quando nenhum bate).
+_SELETORES_DESCRICAO = [
+    "#job-listing-show-container .lis-container__job__content__description",
+    ".listing-container",
+    "article",
+]
+
+# Teto de segurança: visitar a página de CADA vaga do card custa 1 request
+# a mais por vaga (antes era só 1 request pro termo inteiro). Sem limite,
+# um termo com muito resultado multiplicaria o custo/risco de bloqueio sem
+# necessidade — sponsorship só importa pra pouca vaga por ciclo mesmo.
+MAX_DESCRICOES_POR_TERMO = 15
 
 
 class WeWorkRemotelyIntlScraper(BaseScraper):
@@ -34,7 +61,7 @@ class WeWorkRemotelyIntlScraper(BaseScraper):
 
     def _buscar_termo(self, termo: str) -> list[Job]:
         logger.info(f"[WeWorkRemotely Intl] Buscando: {termo}")
-        vagas: list[Job] = []
+        cards: list[dict] = []
         termo_url = quote_plus(termo)
         url = f"https://weworkremotely.com/remote-jobs/search?term={termo_url}"
 
@@ -102,15 +129,20 @@ class WeWorkRemotelyIntlScraper(BaseScraper):
                         "confirmação de busca vazia apareceu em 15s (possível "
                         "bloqueio/anti-bot, não é 0 vaga confirmado)."
                     )
-                    return vagas
+                    return []
                 time.sleep(2)
 
-                cards = page.query_selector_all("li.new-listing-container")
-                if not cards:
+                elementos = page.query_selector_all("li.new-listing-container")
+                if not elementos:
                     logger.info(f"[WeWorkRemotely Intl] 0 resultados confirmados para '{termo}'.")
-                    return vagas
+                    return []
 
-                for card in cards:
+                # Extrai tudo do CARD primeiro, numa lista de dict pura —
+                # separa de propósito do passo seguinte (visitar cada
+                # página), porque navegar pra outra URL invalida os
+                # element handles capturados aqui (ver ADR no topo do
+                # arquivo/comentário de MAX_DESCRICOES_POR_TERMO).
+                for card in elementos:
                     try:
                         titulo_el = card.query_selector(".new-listing__header__title")
                         if not titulo_el:
@@ -120,22 +152,6 @@ class WeWorkRemotelyIntlScraper(BaseScraper):
                         empresa_el = card.query_selector(".new-listing__company-name")
                         empresa = empresa_el.inner_text().strip() if empresa_el else "Não informado"
 
-                        # Todo anúncio do WeWorkRemotely já é vaga remota por
-                        # definição (é a proposta do site) — modalidade="Remoto"
-                        # direto, sem precisar embutir isso em `local`. O campo
-                        # abaixo é a sede da empresa, não a modalidade — fica
-                        # como informação pura de local, sem hack de texto.
-                        #
-                        # MEDIDO: sede da empresa NÃO é o mercado onde a vaga
-                        # contrata (ex: empresa sediada em San Francisco pode
-                        # contratar candidato de qualquer lugar). Desde que
-                        # extrair_escopo_remoto passou a usar `local` inteiro
-                        # como escopo quando `modalidade` já confirma remoto
-                        # (ver Job.escopo_remoto em job.py), guardar a sede
-                        # aqui faria vaga remota mundial ser barrada pelo
-                        # endereço da empresa. `escopo_indefinido=True` abaixo
-                        # tira esse campo da checagem de mercado, sem deixar
-                        # de exibir a sede na notificação.
                         sede_el = card.query_selector(".new-listing__company-headquarters")
                         sede = sede_el.inner_text().strip() if sede_el else "Não informado"
 
@@ -147,23 +163,70 @@ class WeWorkRemotelyIntlScraper(BaseScraper):
 
                         publicado_em = extrair_data_publicacao(card.inner_text())
 
-                        vagas.append(Job(
-                            titulo=titulo,
-                            empresa=empresa,
-                            local=sede,
-                            link=link,
-                            site="We Work Remotely",
-                            publicado_em=publicado_em,
-                            modalidade="Remoto",
-                            escopo_indefinido=True,
-                        ))
+                        cards.append({
+                            "titulo": titulo, "empresa": empresa, "sede": sede,
+                            "link": link, "publicado_em": publicado_em,
+                        })
                     except Exception as e:
                         logger.warning(f"[WeWorkRemotely Intl] Erro ao processar card: {e}")
                         continue
+
+                # Passo 2: visita a página de cada vaga (até o teto) pra ler
+                # o anúncio completo e rodar o classificador de
+                # sponsorship. Falha em UMA vaga não derruba as outras —
+                # pior caso é essa vaga ficar sem descrição (mesmo
+                # resultado de antes desta mudança existir).
+                for item in cards[:MAX_DESCRICOES_POR_TERMO]:
+                    item["descricao"] = self._buscar_descricao(page, item["link"])
 
             except Exception as e:
                 logger.error(f"[WeWorkRemotely Intl] Erro ao buscar '{termo}': {e}")
             finally:
                 browser.close()
 
-        return vagas
+        return [self._montar_vaga(item) for item in cards]
+
+    def _buscar_descricao(self, page, link: str) -> str:
+        try:
+            page.goto(link, timeout=30000)
+            page.wait_for_selector(",".join(_SELETORES_DESCRICAO), state="attached", timeout=10000)
+        except Exception:
+            logger.warning(
+                f"[WeWorkRemotely Intl] Não deu pra confirmar o seletor de descrição em {link} "
+                "— nenhum dos candidatos apareceu em 10s. Vaga fica sem sponsorship."
+            )
+            return ""
+
+        for seletor in _SELETORES_DESCRICAO:
+            el = page.query_selector(seletor)
+            if el:
+                texto = el.inner_text().strip()
+                if texto:
+                    return texto
+        return ""
+
+    def _montar_vaga(self, item: dict) -> Job:
+        descricao = item.get("descricao", "")
+        nota_extra = ""
+        if descricao:
+            resultado = detect_sponsorship(descricao)
+            if resultado["status"] != "unclear":
+                rotulo = {
+                    "explicit_yes": "✅ Vaga declara sponsorship de visto",
+                    "explicit_no": "❌ Vaga declara que NÃO oferece sponsorship de visto",
+                    "conditional": "⚠️ Sponsorship condicional — leia o anúncio",
+                }[resultado["status"]]
+                nota_extra = f'{rotulo}: "{resultado["evidence"]}"'
+
+        return Job(
+            titulo=item["titulo"],
+            empresa=item["empresa"],
+            local=item["sede"],
+            link=item["link"],
+            site="We Work Remotely",
+            publicado_em=item["publicado_em"],
+            modalidade="Remoto",
+            escopo_indefinido=True,
+            descricao=descricao,
+            nota_extra=nota_extra,
+        )

@@ -310,7 +310,7 @@ def ciclo_de_busca(perfil: Perfil):
                     # pra sempre — o próximo ciclo pulava ela em ja_vista()
                     # e a vaga se perdia sem nunca ter sido notificada de
                     # verdade.
-                    if not notificar_vaga(vaga):
+                    if not notificar_vaga(vaga, perfil.chave):
                         logger.warning(
                             f"[{perfil.nome}] Falha ao notificar '{vaga.titulo}' - não marcada "
                             "como vista, tenta de novo no próximo ciclo."

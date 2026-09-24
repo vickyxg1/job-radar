@@ -97,6 +97,22 @@ QUALIFICADORES_CARGO_DEV = [
     "programadora",
 ]
 
+# Perfil é front-end-first (ver currículo real da usuária) — full stack só
+# interessa pareado com Go, Java ou Node, os 3 backends que ela topa
+# mesmo focando em front. Vaga "full stack"/"fullstack" que nomeia
+# EXPLICITAMENTE um backend desta lista no título (ou descrição, quando a
+# fonte tem) é rejeitada; vaga full stack sem backend nomeado continua
+# passando — sem sinal, sem base pra rejeitar (ver comentário de
+# backend_fullstack_bloqueado em core/job.py). Decisão do usuário,
+# 2026-09-24. Ajustar/ampliar a lista quando aparecer vaga real fora
+# desses backends que também deveria ter sido aceita.
+BACKEND_FULLSTACK_BLOQUEADO_DEV = [
+    "python", "django", "flask", "fastapi",
+    "php", "laravel", "symfony",
+    "ruby", "rails",
+    ".net", "c#", "asp.net",
+]
+
 KEYWORDS_DEV = KEYWORDS_CARGO_FORTE_DEV + KEYWORDS_CARGO_AMBIGUO_DEV
 
 # Mesma derivação automática de config.py (TERMOS_CARGO): toda keyword de
@@ -139,7 +155,7 @@ ATIVAR_REMOTO_INTERNACIONAL_DEV = True
 # novos, sem teste ao vivo confirmado contra o endpoint do LinkedIn ainda —
 # ajustar a grafia se algum não resolver.
 LOCATIONS_LINKEDIN_REMOTO_APENAS_DEV = (
-    ["United States", "United Kingdom", "Canada", "Germany", "Ireland", "Netherlands"]
+    ["United States", "United Kingdom", "Canada", "Germany", "Ireland", "Netherlands", "Australia"]
     if ATIVAR_REMOTO_INTERNACIONAL_DEV
     else []
 )
@@ -148,8 +164,12 @@ LOCATIONS_LINKEDIN_REMOTO_APENAS_DEV = (
 # (ver extrair_escopo_remoto em job.py) — lista do QUE ACEITAR, separada da
 # lista de ONDE BUSCAR acima (mesma separação de propósito que
 # LOCATIONS_INTL vs. MERCADOS_REMOTO_ACEITOS_INTL em config_intl.py).
+#
+# Escopo decidido pelo usuário (2026-09-24): só UK, União Europeia,
+# América do Norte, Brasil e Austrália — de propósito sem MENA/África/APAC
+# em geral (Austrália é o único país do APAC aceito, não a região inteira).
 MERCADOS_REMOTO_ACEITOS_DEV = ["Brasil"] + (
-    ["Estados Unidos", "Reino Unido", "Canadá", "Alemanha", "Irlanda", "Holanda", "Europa", "EMEA"]
+    ["Estados Unidos", "Reino Unido", "Canadá", "Alemanha", "Irlanda", "Holanda", "Europa", "EMEA", "Austrália"]
     if ATIVAR_REMOTO_INTERNACIONAL_DEV
     else []
 )

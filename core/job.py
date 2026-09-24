@@ -168,11 +168,25 @@ _MERCADOS_REMOTO = {
     "irlanda": "Irlanda",
     "netherlands": "Holanda",
     "holanda": "Holanda",
+    # Adicionado junto com Austrália em MERCADOS_REMOTO_ACEITOS_DEV — mesmo
+    # motivo do Ireland/Netherlands acima: sem isso, vaga remota escopada
+    # pra Austrália resolvia pra "escopo desconhecido" e era barrada mesmo
+    # com o país aceito. "au" segue o mesmo precedente de "us"/"uk" (sigla
+    # de 2 letras já presente neste dicionário).
+    "australia": "Austrália",
+    "au": "Austrália",
     "latam": "LATAM",
     "latin america": "LATAM",
     "america latina": "LATAM",
     "europe": "Europa",
     "europa": "Europa",
+    # Adicionado junto com o scraper freehire (ver scrapers/freehire.py):
+    # o campo `location` dessa fonte escreve a sigla da região, não o nome
+    # por extenso ("Remote — EU", confirmado no exemplo da própria doc da
+    # API) — sem essa chave, toda vaga remota europeia dessa fonte caía em
+    # "escopo declarado mas desconhecido" (candidato "eu" bruto) e era
+    # rejeitada mesmo com "Europa"/"EMEA" na lista aceita.
+    "eu": "Europa",
     "emea": "EMEA",
     # Resto dos países hispanofalantes/lusófonos que MERCADOS_REMOTO_ACEITOS_INTL
     # passou a aceitar — sem entrada aqui, "Remote - Peru"/"Remote - Uruguay"
@@ -852,6 +866,16 @@ class RegrasFiltro:
     # mercado hispanofalante-lusófono explicitamente. None = não checa
     # (BR não precisa — fonte já é 100% brasileira/portuguesa).
     idiomas_exigidos: list[str] | None = None
+    # Vaga "full stack"/"fullstack" no título é aceita por padrão (mesmo
+    # princípio de "sem sinal contrário, sem base pra rejeitar" do resto
+    # deste filtro) — mas quando o título (ou a descrição, quando a fonte
+    # tem — ver Job.descricao) nomeia EXPLICITAMENTE um backend desta
+    # lista, a vaga é rejeitada mesmo tendo batido keyword/cidade. Uso real:
+    # perfil "dev" é front-end-first, full stack só interessa pareado com
+    # Go/Java/Node (ver BACKEND_FULLSTACK_BLOQUEADO_DEV em config_dev.py) —
+    # qualquer outro backend nomeado no título derruba. None = não checa
+    # (comportamento de antes deste campo existir).
+    backend_fullstack_bloqueado: list[str] | None = None
 
 
 @dataclass
@@ -952,6 +976,16 @@ class Job:
     # reflete). Mantém `local` preenchido pra exibir na notificação — só
     # tira ele da checagem de mercado.
     escopo_indefinido: bool = False
+    # Texto completo do anúncio — "" na imensa maioria das fontes (que só
+    # leem o CARD de busca, nunca a página da vaga). Campo novo, item 6 do
+    # roadmap (Pessoal/ROADMAP-freehire-para-job-radar.md): preenchido só
+    # onde o scraper já visita a página da vaga pra pegar isso (ver
+    # scrapers/weworkremotely_intl.py, primeira fonte a fazer isso) — não
+    # é um convite pra toda fonte passar a visitar página por página, cada
+    # visita a mais é custo/risco de bloqueio real (ver comentário desse
+    # scraper). Usado por core/sponsorship.detect_sponsorship(); "" nele
+    # sempre devolve 'unclear', o que é correto (sem texto, nada pra ler).
+    descricao: str = ""
     # Score de pontuar_relevancia() (0-10), preenchido por filtrar_vagas()
     # depois que a vaga passa combina_com() — 0 até lá (nunca usado sozinho
     # pra decidir nada, só pra ORDENAR/destacar na notificação).
@@ -960,6 +994,13 @@ class Job:
     # relevancia — "" até lá. Só pra aparecer na notificação; não
     # influencia filtro nem score.
     motivo: str = ""
+    # Linha extra opcional que um scraper específico pode preencher pra
+    # aparecer na notificação — sem precisar de um campo novo por feature.
+    # Primeiro uso: FreehireScraper marca aqui quando a empresa está num
+    # registro oficial de patrocinador de visto (GOV.UK/USCIS/IND — ver
+    # scrapers/freehire.py) mesmo que o texto da vaga não fale nada sobre
+    # sponsorship. Não influencia filtro nem score, só notificação.
+    nota_extra: str = ""
 
     def __post_init__(self):
         """Sobrepõe modalidade="Remoto" quando o TÍTULO contradiz (Híbrido/
@@ -1196,8 +1237,27 @@ class Job:
             if _normalizar(c) not in _FLAGS_REMOTO
         )
 
+        # Título+descrição (quando a fonte tem — ver Job.descricao):
+        # backend nomeado explicitamente junto de "full stack"/"fullstack"
+        # que não está na lista permitida derruba a vaga. Vaga full stack
+        # SEM backend nenhum nomeado no texto não bate aqui — sem escopo
+        # declarado, sem base pra rejeitar (mesmo princípio já usado pro
+        # escopo remoto acima).
+        bate_fullstack_bloqueado = False
+        if regras.backend_fullstack_bloqueado is not None:
+            texto_fullstack = f"{titulo_norm} {_normalizar(self.descricao)}"
+            eh_fullstack = any(
+                _contem_termo(termo, texto_fullstack)
+                for termo in ("full stack", "fullstack", "full-stack")
+            )
+            if eh_fullstack:
+                bate_fullstack_bloqueado = any(
+                    _contem_termo(_normalizar(b), texto_fullstack)
+                    for b in regras.backend_fullstack_bloqueado
+                )
+
         return _Avaliacao(
-            aprovada=bate_keyword and bate_cidade,
+            aprovada=bate_keyword and bate_cidade and not bate_fullstack_bloqueado,
             bate_forte=bate_forte,
             bate_ambiguo=bate_ambiguo,
             bate_ferramenta=bate_ferramenta,

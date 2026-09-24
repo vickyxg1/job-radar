@@ -53,11 +53,13 @@ from core.config_dev import (
     CIDADES_DEV,
     MERCADOS_REMOTO_ACEITOS_DEV,
     LOCATIONS_LINKEDIN_REMOTO_APENAS_DEV,
+    BACKEND_FULLSTACK_BLOQUEADO_DEV,
     TERMOS_BUSCA_DEV,
     TERMOS_POR_CICLO_DEV,
 )
 from core.job import RegrasFiltro
 from scrapers.catho import CathoScraper
+from scrapers.freehire import FreehireScraper
 from scrapers.geekhunter import GeekHunterScraper
 from scrapers.gupy import GupyScraper
 from scrapers.indeed import IndeedScraper
@@ -257,6 +259,7 @@ _REGRAS_DEV = RegrasFiltro(
     qualificadores_cargo=QUALIFICADORES_CARGO_DEV,
     cidades=CIDADES_DEV,
     mercados_remoto_aceitos=MERCADOS_REMOTO_ACEITOS_DEV,
+    backend_fullstack_bloqueado=BACKEND_FULLSTACK_BLOQUEADO_DEV,
 )
 
 # Perfil novo, sem medição de rendimento por fonte ainda (mesma situação do
@@ -283,6 +286,11 @@ _SCRAPERS_DEV = [
     DefinicaoScraper(Jobs99Scraper, FREQUENCIA_BAIXA),
     DefinicaoScraper(SolidesScraper, FREQUENCIA_BAIXA),
     DefinicaoScraper(WeWorkRemotelyIntlScraper, FREQUENCIA_ALTA),  # agregador 100% remoto, tech-heavy
+    # API JSON sem chave, sem Playwright — leve o bastante pra rodar todo
+    # ciclo. Catálogo aberto (github.com/strelov1/freehire), já integrado
+    # como fonte no Job-hunter (src/scrapers/apis/freehire.js); aqui só o
+    # eixo remoto entra — ver docstring de FreehireScraper.
+    DefinicaoScraper(FreehireScraper, FREQUENCIA_ALTA),
 ]
 
 PERFIL_DEV = Perfil(
